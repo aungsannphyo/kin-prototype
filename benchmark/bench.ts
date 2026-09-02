@@ -60,6 +60,7 @@ function createInstrumentedScope(counts: InstrumentedCounts): ReturnType<typeof 
     createSubscriber(run) { return inner.createSubscriber(run) },
     disposeSubscriber(sub) { inner.disposeSubscriber(sub) },
     disposeByPrefix(prefix) { inner.disposeByPrefix(prefix) },
+    disposeAll() { inner.disposeAll() },
     notifyField(fieldKey) {
       counts.notifyCalls++
       inner.notifyField(fieldKey)
@@ -116,8 +117,9 @@ async function runS1(): Promise<void> {
   for (const node of nodes) {
     for (let s = 0; s < SUBS_PER_NODE; s++) {
       home.subscribe(() => {
-        executions++
-        void node.state.value
+        // Accessing node.state.value registers the dep via the tracking proxy.
+        // The value is added to executions with ×0 so the count is unaffected.
+        executions += 1 + (Number(node.state.value) * 0)
       })
     }
   }
@@ -174,8 +176,7 @@ async function runS2(): Promise<void> {
     const idx = i
     for (let s = 0; s < SUBS_PER_NODE; s++) {
       home.subscribe(() => {
-        execCounts[idx]++
-        void nodes[idx].state.value
+        execCounts[idx] += 1 + (Number(nodes[idx].state.value) * 0)
       })
     }
   }
@@ -230,7 +231,7 @@ async function runS3(): Promise<void> {
   })
 
   for (let i = 0; i < SUB_COUNT; i++) {
-    home.subscribe(() => { executions++; void node.state.value })
+    home.subscribe(() => { executions += 1 + (Number(node.state.value) * 0) })
   }
 
   executions = 0
@@ -281,7 +282,6 @@ async function runS4(): Promise<void> {
   const totalSubs = NODE_COUNT * FIELDS_PER_NODE
 
   // Initial registration: totalSubs subscribers, each reading 1 field.
-  const subs = []
   const fieldKeys: string[] = []
   for (let n = 0; n < NODE_COUNT; n++) {
     for (let f = 0; f < FIELDS_PER_NODE; f++) {
@@ -295,10 +295,9 @@ async function runS4(): Promise<void> {
   for (let n = 0; n < NODE_COUNT; n++) {
     for (let f = 0; f < FIELDS_PER_NODE; f++) {
       const key = fieldKeys[subIdx++]
-      const s = scope.createSubscriber(() => {
+      scope.createSubscriber(() => {
         scope.trackField(key)   // simulate reading one field
       })
-      subs.push(s)
     }
   }
 
@@ -323,13 +322,10 @@ async function runS4(): Promise<void> {
   row('Total notifyField calls', counts.notifyCalls)
   row('Wall time incl. mutations (ms)', fmt(elapsed))
 
-  home: {
-    // Verify no subs leaked.
-    const remaining = scope.subscriberCount()
-    row('Subscribers remaining after mutations', remaining)
-    row('All still live?', remaining === totalSubs ? '✓ YES' : `✗ NO (${remaining})`)
-    break home
-  }
+  // Verify no subs leaked.
+  const remaining = scope.subscriberCount()
+  row('Subscribers remaining after mutations', remaining)
+  row('All still live?', remaining === totalSubs ? '✓ YES' : `✗ NO (${remaining})`)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +348,7 @@ async function runS5(): Promise<void> {
   )
 
   for (const node of nodes) {
-    home.subscribe(() => { executions++; void node.state.value })
+    home.subscribe(() => { executions += 1 + (Number(node.state.value) * 0) })
   }
 
   executions = 0   // reset after initial run
@@ -378,28 +374,21 @@ async function runS5(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Entry point
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
-  console.log('\n╔══════════════════════════════════════════════════════════╗')
-  console.log('║   KIN Phase B — Synthetic Reactive Benchmark             ║')
-  console.log('╚══════════════════════════════════════════════════════════╝')
-  console.log('\nGoal: validate architectural claim that state updates do')
-  console.log('NOT traverse unrelated nodes.\n')
+console.log('\n╔══════════════════════════════════════════════════════════╗')
+console.log('║   KIN Phase B — Synthetic Reactive Benchmark             ║')
+console.log('╚══════════════════════════════════════════════════════════╝')
+console.log('\nGoal: validate architectural claim that state updates do')
+console.log('NOT traverse unrelated nodes.\n')
 
-  await runS1()
-  await runS2()
-  await runS3()
-  await runS4()
-  await runS5()
+await runS1()
+await runS2()
+await runS3()
+await runS4()
+await runS5()
 
-  console.log(`\n${'═'.repeat(60)}`)
-  console.log('  Benchmark complete.')
-  console.log('═'.repeat(60) + '\n')
-}
-
-main().catch((err: unknown) => {
-  console.error(err)
-  process.exit(1)
-})
+console.log(`\n${'═'.repeat(60)}`)
+console.log('  Benchmark complete.')
+console.log('═'.repeat(60) + '\n')

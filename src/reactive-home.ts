@@ -12,8 +12,9 @@
  *  - subscribe()   — creates a subscriber in the shared scope
  *  - unsubscribe() — disposes a subscriber
  *  - flush()       — returns the current microtask flush promise (for tests)
- *  - destroy()     — destroys all root nodes (which cleans their subscriptions)
- *                    then disposes any remaining subscribers in the scope
+ *  - destroy()     — destroys all root nodes (cleaning their subscriptions via
+ *                    disposeByPrefix), then calls scope.disposeAll() to clean
+ *                    any zero-dep subscribers that have no field deps to match on.
  */
 
 import type { StateRecord, ActionsMap, ReactiveHome } from './types.js'
@@ -21,7 +22,7 @@ import {
   createReactiveNode,
   type ReactiveInternalNode,
   type ReactiveHomeOwnerInternal,
-  ReactiveNodeDefinition
+  type ReactiveNodeDefinition,  // STYLE-1 FIX: was a value import, must be type-only
 } from './reactive-node.js'
 import { createReactiveScope } from './reactive.js'
 import type { Subscriber } from './reactive.js'
@@ -70,11 +71,19 @@ export function createReactiveHome(): ReactiveHome {
     destroy(): void {
       if (_destroyed) return
 
+      // Destroy all root nodes. Each node.destroy() calls scope.disposeByPrefix()
+      // for its own field prefix, cleaning up all field-dep subscribers.
       const rootSnapshot = [..._roots]
       for (const root of rootSnapshot) {
         root.destroy()
       }
       _roots.clear()
+
+      // BUG-2 FIX: disposeByPrefix only catches subscribers that currently have
+      // a dep on the node's fields. Zero-dep subscribers (and any edge-case
+      // stale subscribers) are not reachable via the field prefix. Call
+      // disposeAll() to flush everything remaining in the scope.
+      scope.disposeAll()
 
       _destroyed = true
     },

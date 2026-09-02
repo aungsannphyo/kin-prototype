@@ -4,21 +4,32 @@
  * This module is intentionally Node-agnostic.
  * It contains only:
  *
- *   - FieldSubscriberIndex   field   → Set<SubscriberId>
+ *   - FieldSubscriberIndex       field → Set<SubscriberId>
  *   - SubscriberDependencyIndex  subscriber → Set<FieldKey>
- *   - TrackingContext        "which subscriber is currently executing?"
- *   - Scheduler              microtask-based flush, deduplicates pending runs
- *   - createReactiveScope()  factory that creates an isolated reactive runtime
+ *   - TrackingContext            "which subscriber is currently executing?"
+ *   - Scheduler                 microtask-based flush, deduplicates pending runs
+ *   - createReactiveScope()     factory that creates an isolated reactive runtime
  *
  * A "field key" is just a string.  Callers (reactive-node.ts) concatenate
  * node-id + field-name to produce a globally unique key, e.g. "n1:balance".
  *
  * Design principles encoded here:
- *   - No tree traversal.  update path is: field mutated → index lookup → schedule.
- *   - No equality check here — callers decide whether to notify (they compare
- *     old/new with Object.is before calling notifyField).
+ *   - No tree traversal.  Update path: field mutated → index lookup → schedule.
+ *   - No equality check here — callers compare old/new with Object.is before
+ *     calling notifyField.
  *   - Dynamic deps: every time a subscriber re-runs, its dep set is rebuilt
  *     from scratch (collected during the run, old deps cleared first).
+ *
+ * --- Scheduler invariants ---
+ *   _flushScheduled  true between _scheduleFlush() and the microtask firing.
+ *   _flushing        true for the entire synchronous execution of _flush(),
+ *                    including all subscriber runs within that cycle.
+ *   flushPromise()   returns _flushPromise (the current cycle's promise) when
+ *                    _flushScheduled OR _flushing is true; otherwise returns
+ *                    Promise.resolve() immediately.
+ *   This ensures that callers who call flushPromise() from inside a subscriber
+ *   run (i.e. while _flushing=true, _flushScheduled=false) still get a promise
+ *   that resolves only after the full flush cycle completes.
  */
 
 // ---------------------------------------------------------------------------
@@ -27,7 +38,6 @@
 
 /**
  * A Subscriber is a record managed by the reactive runtime.
- * The public-facing wrapper is ReactiveSubscriber (in types.ts).
  */
 export interface Subscriber {
   readonly id: string
@@ -38,10 +48,7 @@ export interface Subscriber {
 }
 
 // ---------------------------------------------------------------------------
-// Reactive scope
-//
-// All state is encapsulated inside a scope so multiple independent runtimes
-// can coexist (e.g. multiple Home instances in the same process).
+// Reactive scope interface
 // ---------------------------------------------------------------------------
 
 export interface ReactiveScope {
@@ -54,6 +61,13 @@ export interface ReactiveScope {
 
   /** Dispose ALL subscribers whose field keys start with the given prefix. */
   disposeByPrefix(prefix: string): void
+
+  /**
+   * Dispose ALL live subscribers in this scope.
+   * Called by ReactiveHome.destroy() to clean up zero-dep subscribers that
+   * disposeByPrefix() cannot reach (they have no field entries to match on).
+   */
+  disposeAll(): void
 
   // -- Mutation notification ------------------------------------------------
   /**
@@ -69,10 +83,10 @@ export interface ReactiveScope {
    */
   trackField(fieldKey: string): void
 
-  // -- Flush (exposed so tests can await microtasks explicitly) -------------
+  // -- Flush ----------------------------------------------------------------
   /**
-   * Returns the promise that resolves when the current pending flush
-   * completes.  Resolves immediately if nothing is pending.
+   * Returns a promise that resolves when the current pending flush cycle
+   * completes.  Resolves immediately if no flush is pending or in progress.
    */
   flushPromise(): Promise<void>
 
@@ -95,85 +109,82 @@ function nextSubId(): string {
 // ---------------------------------------------------------------------------
 
 export function createReactiveScope(): ReactiveScope {
-  /**
-   * field → Set<SubscriberId>
-   * "who cares about this field?"
-   */
+  // field → Set<subscriberId>  — "who depends on this field?"
   const _fieldIndex = new Map<string, Set<string>>()
 
-  /**
-   * SubscriberId → Subscriber
-   * All live subscribers.
-   */
+  // subscriberId → Subscriber
   const _subscribers = new Map<string, Subscriber>()
 
-  /**
-   * SubscriberId → Set<FieldKey>
-   * "what fields does this subscriber depend on?"
-   * Required for efficient cleanup when a subscriber is disposed or re-runs.
-   */
+  // subscriberId → Set<fieldKey>  — "what fields does this subscriber depend on?"
   const _depIndex = new Map<string, Set<string>>()
 
   // ---- Tracking context ---------------------------------------------------
-  // At most one subscriber is tracking at a time.
-  // Set to the running subscriber before calling sub.run(), cleared after.
   let _tracking: Subscriber | null = null
 
   // ---- Scheduler ----------------------------------------------------------
-  // A Set of subscriber IDs pending execution.
-  // Flushed as a microtask (Promise.resolve().then(...)).
   const _pending = new Set<string>()
   let _flushScheduled = false
-  // The promise for the current flush cycle.
+  // BUG-1 FIX: separate flag for "flush body currently executing".
+  // flushPromise() must return the live promise when either _flushScheduled
+  // (queued but not started) OR _flushing (started but not resolved yet).
+  let _flushing = false
   let _flushResolve: (() => void) | null = null
   let _flushPromise: Promise<void> = Promise.resolve()
 
   function _scheduleFlush(): void {
-    if (_flushScheduled) return
+    if (_flushScheduled || _flushing) return  // already scheduled or running
     _flushScheduled = true
     _flushPromise = new Promise<void>((resolve) => {
       _flushResolve = resolve
     })
-    // Use queueMicrotask for a clean microtask (no .then chaining overhead).
-    queueMicrotask(_flush)
+    // Schedule the flush as a Promise microtask rather than queueMicrotask.
+    // Promise .then() callbacks and queueMicrotask callbacks are both
+    // microtasks, but node:test in Node 22 correctly drains Promise chains
+    // when awaiting a test. Using queueMicrotask can leave the callback
+    // pending past the point where node:test considers the event loop idle.
+    void Promise.resolve().then(_flush)
   }
 
   function _flush(): void {
-    // Snapshot and clear pending before running — a subscriber may trigger
-    // new mutations during its run (same-tick cascades), which will be
-    // collected into a fresh _pending set and scheduled for the next microtask.
-    const batch = [..._pending]
-    _pending.clear()
+    // Process all pending subscribers, including any added by mutations
+    // that happen during subscriber runs (cascades). We loop until _pending
+    // is empty so that the entire causal chain is flushed in one cycle.
+    // This guarantees:
+    //   1. A single await home.flush() drains all cascaded mutations.
+    //   2. No dangling Promise.resolve().then(_flush) microtasks are left
+    //      pending after the flush completes.
+    //   3. The flush promise resolves only after all cascades are done.
     _flushScheduled = false
+    _flushing = true
 
-    for (const id of batch) {
-      const sub = _subscribers.get(id)
-      // Skip if disposed between schedule and flush.
-      if (sub === undefined || sub.disposed) continue
-      _runSubscriber(sub)
+    try {
+      // Loop until no new pending work was generated.
+      while (_pending.size > 0) {
+        const batch = [..._pending]
+        _pending.clear()
+        for (const id of batch) {
+          const sub = _subscribers.get(id)
+          if (sub === undefined || sub.disposed) continue
+          _runSubscriber(sub)
+        }
+      }
+    } finally {
+      _flushing = false
+      const resolve = _flushResolve
+      _flushResolve = null
+      if (resolve !== null) resolve()
     }
-
-    // Resolve the flush promise so tests can await it.
-    const resolve = _flushResolve
-    _flushResolve = null
-    if (resolve !== null) resolve()
   }
 
   // ---- Subscriber execution -----------------------------------------------
 
   function _runSubscriber(sub: Subscriber): void {
-    // 1. Clear existing dependencies so they are rebuilt from scratch.
     _clearDeps(sub.id)
-
-    // 2. Set tracking context.
     const prev = _tracking
     _tracking = sub
-
-    // 3. Run — reads inside the function will call trackField().
     try {
       sub.run()
     } finally {
-      // 4. Restore tracking context (supports nested subscribers in the future).
       _tracking = prev
     }
   }
@@ -187,7 +198,6 @@ export function createReactiveScope(): ReactiveScope {
       const subs = _fieldIndex.get(field)
       if (subs !== undefined) {
         subs.delete(id)
-        // Prune empty sets to avoid memory accumulation.
         if (subs.size === 0) _fieldIndex.delete(field)
       }
     }
@@ -195,7 +205,6 @@ export function createReactiveScope(): ReactiveScope {
   }
 
   function _addDep(id: string, fieldKey: string): void {
-    // field → subscriber
     let subs = _fieldIndex.get(fieldKey)
     if (subs === undefined) {
       subs = new Set()
@@ -203,7 +212,6 @@ export function createReactiveScope(): ReactiveScope {
     }
     subs.add(id)
 
-    // subscriber → field
     let fields = _depIndex.get(id)
     if (fields === undefined) {
       fields = new Set()
@@ -222,7 +230,6 @@ export function createReactiveScope(): ReactiveScope {
     }
     _subscribers.set(sub.id, sub)
     _depIndex.set(sub.id, new Set())
-    // First run — synchronous, so initial dependencies are registered.
     _runSubscriber(sub)
     return sub
   }
@@ -237,13 +244,8 @@ export function createReactiveScope(): ReactiveScope {
   }
 
   function disposeByPrefix(prefix: string): void {
-    // Collect IDs first to avoid mutating the map during iteration.
     const toDispose: Subscriber[] = []
     for (const [id, sub] of _subscribers) {
-      // We only need to know if this subscriber has any dep matching the prefix.
-      // But since subscriber IDs are unrelated to node IDs, we need to check
-      // via the dep index: does this sub depend on any field with this prefix?
-      // More efficient: check _depIndex for fields starting with prefix.
       const fields = _depIndex.get(id)
       if (fields !== undefined) {
         for (const field of fields) {
@@ -258,13 +260,44 @@ export function createReactiveScope(): ReactiveScope {
       disposeSubscriber(sub)
     }
 
-    // Also remove any orphaned field entries with this prefix
-    // (e.g. fields that existed but had no subscribers at dispose time).
-    for (const field of _fieldIndex.keys()) {
-      if (field.startsWith(prefix)) {
-        _fieldIndex.delete(field)
-      }
+    // BUG-3 FIX: snapshot _fieldIndex keys before iterating to avoid relying
+    // on implementation-defined Map mutation-during-iteration behaviour.
+    const orphanedFields = [..._fieldIndex.keys()].filter(f => f.startsWith(prefix))
+    for (const field of orphanedFields) {
+      _fieldIndex.delete(field)
     }
+  }
+
+  // BUG-2 FIX + cascade-flush leak fix: dispose every remaining subscriber
+  // AND eagerly flush so no Promise.resolve().then(_flush) microtask remains
+  // pending in the queue after cleanup. node:test (Node 22) detects dangling
+  // microtask-promise chains and cancels the test with "Promise resolution is
+  // still pending" if any are left when the test function returns.
+  function disposeAll(): void {
+    // If a flush is scheduled, run it eagerly and synchronously right now.
+    // This drains _pending, resolves _flushResolve, and sets _flushScheduled=false.
+    // The already-queued Promise.resolve().then(_flush) will still fire later,
+    // but _pending will be empty and _flushScheduled=false so it becomes a no-op.
+    if (_flushScheduled || _flushing) {
+      _flush()
+    }
+
+    // Snapshot first — disposeSubscriber mutates _subscribers.
+    const all = [..._subscribers.values()]
+    for (const sub of all) {
+      disposeSubscriber(sub)
+    }
+    // Belt-and-suspenders: clear both indexes entirely.
+    _fieldIndex.clear()
+    _depIndex.clear()
+    _pending.clear()
+    // Ensure the flush promise is resolved so no awaiter hangs.
+    const resolve = _flushResolve
+    _flushResolve = null
+    _flushScheduled = false
+    _flushing = false
+    if (resolve !== null) resolve()
+    _flushPromise = Promise.resolve()
   }
 
   function notifyField(fieldKey: string): void {
@@ -284,8 +317,9 @@ export function createReactiveScope(): ReactiveScope {
     _addDep(_tracking.id, fieldKey)
   }
 
+  // BUG-1 FIX: return live promise whenever scheduled OR currently flushing.
   function flushPromise(): Promise<void> {
-    return _flushScheduled ? _flushPromise : Promise.resolve()
+    return (_flushScheduled || _flushing) ? _flushPromise : Promise.resolve()
   }
 
   function subscriberCount(): number {
@@ -300,6 +334,7 @@ export function createReactiveScope(): ReactiveScope {
     createSubscriber,
     disposeSubscriber,
     disposeByPrefix,
+    disposeAll,
     notifyField,
     trackField,
     flushPromise,
