@@ -9,32 +9,31 @@
  *  - A set of root ReactiveInternalNodes
  *  - A GrantStore (Phase C: manages Relationships and Grants)
  *
- * It exposes:
- *  - node()        — creates root reactive nodes
- *  - subscribe()   — creates a subscriber in the shared scope
- *  - unsubscribe() — disposes a subscriber
- *  - flush()       — returns the current microtask flush promise (for tests)
- *  - relationship() — creates a Relationship between two nodes (Phase C)
- *  - subscribeAs() — cross-node authorized subscription (Phase C)
- *  - destroy()     — destroys all root nodes (cleaning their subscriptions via
- *                    disposeByPrefix), then calls scope.disposeAll() to clean
- *                    any zero-dep subscribers that have no field deps to match on.
+ * Phase C subscribeAs() flow:
+ *  1. authorize()           — throws if no Relationship or no active Grant
+ *  2. createAuthorizedView() — wraps target.state behind a capability filter proxy
+ *  3. scope.createSubscriber(() => run(view))  — normal Phase B subscriber
+ *  4. linkSubscriberToGrant()  — revocation disposes the subscriber
+ *
+ * The callback receives only the AuthorizedView, never the raw ReactiveNode.
+ * State mutation path is completely unchanged:
+ *   notifyField → _fieldIndex → schedule → flush
  */
 
 import type { StateRecord, ActionsMap, ReactiveHome } from './types.js'
 import {
   createReactiveNode,
+  type ReactiveNode,
   type ReactiveInternalNode,
   type ReactiveHomeOwnerInternal,
-  type ReactiveNodeDefinition,  // STYLE-1 FIX: was a value import, must be type-only
+  type ReactiveNodeDefinition,
 } from './reactive-node.js'
 import { createReactiveScope } from './reactive.js'
 import type { Subscriber } from './reactive.js'
 import { HOME_OWNER_TAG } from './types.js'
 import { createGrantStore } from './grant.js'
-import { authorize, linkSubscriberToGrant } from './authorization.js'
-import type { ReactiveNode } from './reactive-node.js'
-import type { Relationship } from './relationship.js'
+import { authorize, createAuthorizedView, linkSubscriberToGrant } from './authorization.js'
+import { GRANT_INTERNAL, type GrantInternal, type Relationship, type AuthorizedView } from './relationship.js'
 
 export function createReactiveHome(): ReactiveHome {
   const scope = createReactiveScope()
@@ -87,22 +86,32 @@ export function createReactiveHome(): ReactiveHome {
       return grantStore.createRelationship(source, target)
     },
 
-    subscribeAs(
+    subscribeAs<S extends StateRecord, A extends ActionsMap<S>>(
       source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
-      target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
-      run: () => void
+      target: ReactiveNode<S, A>,
+      run: (view: AuthorizedView<S>) => void
     ): Subscriber {
       if (_destroyed) {
         throw new Error('Cannot subscribe on a destroyed Home.')
       }
 
-      // Phase C authorization check.
-      const grant = authorize(source, target, grantStore)
+      // Step 1: Authorization check — throws if no Relationship or no active Grant.
+      const grant = authorize(
+        source,
+        target as ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+        grantStore
+      )
 
-      // Create the subscriber using the existing Phase B machinery.
-      const sub = scope.createSubscriber(run)
+      // Step 2: Build the capability-filtered view.
+      // readSnapshot is the defensive copy captured at Grant-creation time.
+      const readSnapshot = (grant as GrantInternal)[GRANT_INTERNAL].readSnapshot
+      const view = createAuthorizedView<S>(target, readSnapshot)
 
-      // Link the subscriber to the grant so that revoking the grant disposes the subscriber.
+      // Step 3: Create the subscriber using the existing Phase B machinery.
+      // The callback receives only the AuthorizedView — never the raw target.
+      const sub = scope.createSubscriber(() => run(view))
+
+      // Step 4: Link the subscriber to the grant so revocation disposes it.
       linkSubscriberToGrant(grant, () => {
         scope.disposeSubscriber(sub)
       })
@@ -113,21 +122,17 @@ export function createReactiveHome(): ReactiveHome {
     destroy(): void {
       if (_destroyed) return
 
-      // Destroy all root nodes. Each node.destroy() calls scope.disposeByPrefix()
-      // for its own field prefix, cleaning up all field-dep subscribers.
+      // Destroy all root nodes — each calls scope.disposeByPrefix() for its fields.
       const rootSnapshot = [..._roots]
       for (const root of rootSnapshot) {
         root.destroy()
       }
       _roots.clear()
 
-      // Phase C: destroy all Relationships (which revokes all Grants and their linked subscriptions).
+      // Phase C: destroy all Relationships (revokes all Grants, disposes linked subs).
       grantStore.destroyAll()
 
-      // BUG-2 FIX: disposeByPrefix only catches subscribers that currently have
-      // a dep on the node's fields. Zero-dep subscribers (and any edge-case
-      // stale subscribers) are not reachable via the field prefix. Call
-      // disposeAll() to flush everything remaining in the scope.
+      // Clean any remaining zero-dep or stale subscribers.
       scope.disposeAll()
 
       _destroyed = true

@@ -467,9 +467,9 @@ async function runC1(): Promise<void> {
     const cap = capability([TARGET_FIELD])
     rel.grant(cap)
 
-    // Authorized cross-node subscription.
-    home.subscribeAs(source, target, () => {
-      executions += 1 + (Number(target.state.balance) * 0)
+    // Authorized cross-node subscription — callback receives AuthorizedView.
+    home.subscribeAs(source, target, (view) => {
+      executions += 1 + (Number(view.state.balance) * 0)
     })
   }
 
@@ -559,8 +559,8 @@ async function runC2(): Promise<void> {
 
   const t0Auth = performance.now()
   for (let i = 0; i < SUB_COUNT; i++) {
-    homeAuth.subscribeAs(source, target, () => {
-      authExecutions += 1 + (Number(target.state.balance) * 0)
+    homeAuth.subscribeAs(source, target, (view) => {
+      authExecutions += 1 + (Number(view.state.balance) * 0)
     })
   }
   const authCreateTime = performance.now() - t0Auth

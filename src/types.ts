@@ -190,7 +190,7 @@ import type {
   ReactiveNode,
   ReactiveNodeDefinition,
 } from './reactive-node.js'
-import type { Relationship } from './relationship.js'
+import type { Relationship, AuthorizedView } from './relationship.js'
 
 export type { Subscriber }
 // Export the PUBLIC ReactiveNode type only.
@@ -248,25 +248,26 @@ export interface ReactiveHome {
   /**
    * Phase C — Create an authorized cross-node subscription.
    *
-   * This performs an authorization check (requires a Relationship and an
-   * active Grant from source → target) before creating the subscription.
-   * If authorized, the subscriber behaves like a normal reactive subscriber:
-   * it runs immediately (registering deps on the target node's fields) and
-   * re-runs when those fields change.
+   * Performs an authorization check (requires a Relationship and an active Grant
+   * from source → target) then builds an AuthorizedView of the target.
    *
-   * The subscription is automatically disposed if the Grant is revoked or the
-   * Relationship is destroyed.
+   * The callback receives only the AuthorizedView<S> — a capability-filtered,
+   * Phase-B-tracked state surface. It cannot reach the real ReactiveNode,
+   * its internals, or any field not listed in the Grant's Capability.
    *
-   * @param source Node seeking access (must have a Relationship to target).
-   * @param target Node being accessed.
-   * @param run The subscriber callback — typically reads target.state fields.
-   * @returns The Subscriber handle — pass to unsubscribe() to clean up.
+   * Reading an allowed field:   works, registers Phase B dependency normally.
+   * Reading a denied field:     throws KinAuthError('FIELD_NOT_GRANTED').
+   * Writing through the view:   always throws TypeError.
+   *
+   * The subscription is automatically disposed when the Grant is revoked or
+   * the Relationship is destroyed. Re-granting does NOT restore old subs.
+   *
    * @throws KinAuthError if no Relationship exists or no active Grant is found.
    */
-  subscribeAs(
+  subscribeAs<S extends StateRecord, A extends ActionsMap<S>>(
     source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
-    target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
-    run: () => void
+    target: ReactiveNode<S, A>,
+    run: (view: AuthorizedView<S>) => void
   ): Subscriber
 
   /**

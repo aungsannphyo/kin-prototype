@@ -51,4 +51,5 @@ export type {
   Grant,
   Relationship,
   KinAuthErrorCode,
+  AuthorizedView,
 } from './relationship.js'

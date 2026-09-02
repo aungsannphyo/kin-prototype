@@ -29,7 +29,7 @@
 
 import type { ReactiveNode, ReactiveInternalNode } from './reactive-node.js'
 import { REACTIVE_NODE_INTERNAL } from './reactive-node.js'
-import type { StateRecord, ActionsMap } from './types.js'
+import type { StateRecord, ActionsMap, ReadonlyState } from './types.js'
 
 // ---------------------------------------------------------------------------
 // ID generators
@@ -52,6 +52,7 @@ export type KinAuthErrorCode =
   | 'RELATIONSHIP_DESTROYED'
   | 'NODE_DESTROYED'
   | 'INVALID_CAPABILITY'
+  | 'FIELD_NOT_GRANTED'
 
 export class KinAuthError extends Error {
   constructor(
@@ -79,9 +80,41 @@ export interface Capability {
   readonly read: ReadonlySet<string>
 }
 
-/** Construct a Capability from an array of readable field names. */
+/** Construct a Capability from an array of readable field names.
+ *
+ * The returned Capability captures a snapshot of `fields` at call time.
+ * Mutating the original array afterwards does NOT affect the Capability.
+ * The internal Set is intentionally not re-exported so consumers cannot
+ * call .add() on it at runtime — they must go through this factory.
+ */
 export function capability(fields: string[]): Capability {
+  // Defensive copy: snapshot at call time, independent of the input array.
   return { read: new Set(fields) }
+}
+
+// ---------------------------------------------------------------------------
+// AuthorizedView
+//
+// The restricted view of a target node's state that is passed to the
+// subscribeAs() callback. It exposes ONLY the fields permitted by the
+// Grant's Capability. Reading a field outside the capability throws
+// KinAuthError('FIELD_NOT_GRANTED').
+//
+// Crucially, the state property delegates to the target node's existing
+// tracking proxy, so Phase B dependency registration (trackField) still
+// occurs normally for all permitted reads.
+//
+// AuthorizedView intentionally exposes NO other node surface:
+//   ✗ actions   — cannot invoke target actions through this view
+//   ✗ destroy   — cannot destroy the target
+//   ✗ child     — cannot navigate the ownership tree
+//   ✗ isParent  — no structural info
+//   ✗ isChild   — no structural info
+// ---------------------------------------------------------------------------
+
+export interface AuthorizedView<S extends StateRecord> {
+  /** Capability-filtered, Phase-B-tracked state of the target node. */
+  readonly state: ReadonlyState<S>
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +162,13 @@ export interface GrantInternal extends Grant {
   readonly [GRANT_INTERNAL]: {
     /** Disposer functions for subscribers authorized by this Grant. */
     readonly linkedDisposers: Set<() => void>
+    /**
+     * Defensive snapshot of the Capability's read set, taken at Grant-creation
+     * time. Independent of the original Capability object — mutating the
+     * original Capability after the Grant is issued does NOT affect this set.
+     * Used by createAuthorizedView() to enforce field-level access.
+     */
+    readonly readSnapshot: ReadonlySet<string>
   }
 }
 
@@ -191,6 +231,9 @@ function _createGrant(
 
   const _id = nextGrantId()
   const _linkedDisposers = new Set<() => void>()
+  // Defensive snapshot: captured at grant-creation time.
+  // Mutating cap.read after this point has zero effect on what this grant allows.
+  const _readSnapshot: ReadonlySet<string> = new Set(cap.read)
   let _revoked = false
 
   // Forward-declared so revoke() can reference grantRef.
@@ -218,7 +261,7 @@ function _createGrant(
     },
 
     get [GRANT_INTERNAL]() {
-      return { linkedDisposers: _linkedDisposers }
+      return { linkedDisposers: _linkedDisposers, readSnapshot: _readSnapshot }
     },
   }
 
