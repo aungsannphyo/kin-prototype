@@ -1,38 +1,27 @@
 /**
  * Phase B — Reactive Node
  *
- * createReactiveNode() wraps createNode() (Phase A) and layers three things
- * on top:
+ * createReactiveNode() builds a reactive node with two layers:
  *
- *  1. TRACKING PROXY — replaces the Phase A readonly proxy with a new proxy
- *     that also calls scope.trackField() on every get, so reads inside a
- *     subscriber automatically register field-level dependencies.
+ *  PUBLIC SURFACE  — only framework concepts a consumer needs
+ *    state (tracking+readonly proxy), actions, isParent, isChild, child(), destroy()
  *
- *  2. MUTATION PROXY — replaces the raw state object passed into actions via
- *     ctx.state.  On every set it:
- *       a. Compares old/new with Object.is (skip notification if equal)
- *       b. Writes the new value
- *       c. Calls scope.notifyField() so affected subscribers are scheduled
- *     The mutation proxy is only active while an action is executing.
- *     No code path outside an action ever touches it.
+ *  INTERNAL STATE  — hidden behind a module-private Symbol (REACTIVE_NODE_INTERNAL)
+ *    _owner, _lifecycle, _removeChild
+ *    These are NOT enumerable properties on the node object.
+ *    External code that does not import the Symbol cannot reach them.
  *
- *  3. DESTROY HOOK — when the node is destroyed, scope.disposeByPrefix() is
- *     called with this node's field-key prefix, removing every subscription
- *     that touches this node's state from both reactive indexes.
+ * Reactive machinery (tracking proxy, mutation proxy, scope interaction) is
+ * entirely internal to this module. No reactive internals appear on the
+ * public node surface.
  *
- * Field key format:  "<nodeId>:<fieldName>"
- *   e.g. "n3:balance"
+ * Field key format:  "<nodeId>:<fieldName>"   e.g. "n3:balance"
  *
- * This file has NO knowledge of batching — batching is handled entirely
- * inside the scheduler in reactive.ts (queueMicrotask + _pending Set).
- * Actions simply call scope.notifyField() for each mutated field; the
- * scheduler deduplicates subscribers automatically.
- *
- * Phase A invariants are fully preserved:
- *  - node.state is still a readonly proxy (throws on external set)
- *  - Actions remain the only mutation boundary
+ * Phase A invariants preserved:
+ *  - node.state is a readonly proxy (throws on external set)
+ *  - Actions are the only mutation boundary
  *  - Lifecycle guards are unchanged
- *  - Cascade destroy is unchanged
+ *  - Cascade destroy (post-order) is unchanged
  */
 
 import type {
@@ -48,14 +37,39 @@ import { HOME_OWNER_TAG } from './types.js'
 import type { ReactiveScope } from './reactive.js'
 
 // ---------------------------------------------------------------------------
-// Types (local — the public types are in types.ts)
+// Internal-slot Symbol
+//
+// This Symbol is the only key under which internal node state is stored on
+// the public node object. It is exported so that:
+//   - reactive-home.ts can access _removeRoot during destroy
+//   - tests can cast to ReactiveInternalNode and read _owner/_lifecycle
+//
+// Consumers who import only from index.ts never see this Symbol.
 // ---------------------------------------------------------------------------
 
-export interface ReactiveInternalNode<
+export const REACTIVE_NODE_INTERNAL = Symbol('ReactiveNodeInternal')
+
+/** The shape of the internal slot stored under REACTIVE_NODE_INTERNAL. */
+export interface ReactiveNodeInternalSlot {
+  readonly _owner: Owner
+  readonly _lifecycle: LifecycleState
+  _removeChild(child: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): void
+}
+
+// ---------------------------------------------------------------------------
+// Types — PUBLIC and INTERNAL node interfaces
+// ---------------------------------------------------------------------------
+
+/**
+ * ReactiveNode — the PUBLIC consumer-facing interface.
+ *
+ * Contains only the framework concepts a consumer legitimately uses.
+ * Internal implementation details are NOT on this surface.
+ */
+export interface ReactiveNode<
   S extends StateRecord,
   A extends ActionsMap<S>,
 > {
-  // ---------- Public surface (same shape as Phase A InternalNode) ----------
   readonly state: ReadonlyState<S>
   readonly actions: BoundActions<S, A>
   readonly isParent: boolean
@@ -63,17 +77,31 @@ export interface ReactiveInternalNode<
   destroy(): void
   child<CS extends StateRecord, CA extends ActionsMap<CS>>(
     def: ReactiveNodeDefinition<CS, CA>
+  ): ReactiveNode<CS, CA>
+}
+
+/**
+ * ReactiveInternalNode — the INTERNAL interface used by framework code.
+ *
+ * Extends ReactiveNode by adding the REACTIVE_NODE_INTERNAL slot.
+ * The slot holds _owner, _lifecycle, and _removeChild.
+ * NOT exported from index.ts.
+ *
+ * Internal framework code (reactive-home.ts) and Phase B tests that verify
+ * internal invariants import this type directly from reactive-node.ts.
+ */
+export interface ReactiveInternalNode<
+  S extends StateRecord,
+  A extends ActionsMap<S>,
+> extends ReactiveNode<S, A> {
+  // Override child() so internal callers get the full internal type back.
+  child<CS extends StateRecord, CA extends ActionsMap<CS>>(
+    def: ReactiveNodeDefinition<CS, CA>
   ): ReactiveInternalNode<CS, CA>
 
-  // ---------- Internal surface ---------------------------------------------
-  // These members are framework-internal. They use the _ prefix as a
-  // convention signal. _scope and _nodeId are intentionally NOT part of
-  // this interface — they were removed to prevent consumers from calling
-  // scope.notifyField() or scope.trackField() directly and bypassing the
-  // Action boundary / future Grant authorization.
-  _removeChild(child: ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>): void
-  readonly _owner: Owner
-  readonly _lifecycle: LifecycleState
+  // The internal slot is stored under a Symbol key — not discoverable via
+  // string enumeration, `in` checks with string names, or JSON.stringify.
+  readonly [REACTIVE_NODE_INTERNAL]: ReactiveNodeInternalSlot
 }
 
 export type ReactiveNodeDefinition<
@@ -140,10 +168,9 @@ function makeTrackingReadonlyProxy<S extends StateRecord>(
  * set  — lifecycle guard → Object.is check → write → notifyField
  * deleteProperty — lifecycle guard → reject (state shape must not change)
  *
- * NOTE: No defineProperty trap here. Reflect.set internally calls
- * [[DefineOwnProperty]] for new properties on a Proxy target; adding a
- * defineProperty trap would intercept those internal calls and break
- * normal assignment. The set trap's lifecycle guard is sufficient protection.
+ * NOTE: No defineProperty trap. Reflect.set internally calls [[DefineOwnProperty]]
+ * for new properties on a Proxy target; a trap there would break normal assignment.
+ * The set trap's lifecycle guard is sufficient.
  */
 function makeMutatingProxy<S extends StateRecord>(
   raw: S,
@@ -208,9 +235,7 @@ export function createReactiveNode<
   const _rawState: S = (def.state !== undefined ? { ...def.state } : {}) as S
 
   // -- Proxies --------------------------------------------------------------
-  // Public: readonly + tracking
   const _trackingProxy = makeTrackingReadonlyProxy(_rawState, nodeId, scope)
-  // Action-internal: mutable + notifying + lifecycle-guarded
   const _mutatingProxy = makeMutatingProxy(_rawState, nodeId, scope, () => _lifecycle)
 
   // -- Children & lifecycle -------------------------------------------------
@@ -233,8 +258,6 @@ export function createReactiveNode<
       Object.defineProperty(_boundActions, key, {
         value: (...args: unknown[]) => {
           assertActive(`invoke action "${key}"`)
-          // ctx.state is the MUTATING proxy so writes inside the action
-          // automatically trigger notifyField.
           fn({ state: _mutatingProxy }, ...(args as never[]))
         },
         enumerable: true,
@@ -244,7 +267,19 @@ export function createReactiveNode<
     }
   }
 
-  // -- Node object ----------------------------------------------------------
+  // -- Internal slot --------------------------------------------------------
+  // Stored under the module-private REACTIVE_NODE_INTERNAL Symbol.
+  // Not visible via string-keyed enumeration or `in` checks.
+  const internalSlot: ReactiveNodeInternalSlot = {
+    get _owner(): Owner { return owner },
+    get _lifecycle(): LifecycleState { return _lifecycle },
+    _removeChild(child: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): void {
+      _children.delete(child as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
+    },
+  }
+
+  // -- Public node object ---------------------------------------------------
+  // Contains ONLY the public surface. Internal state is behind the Symbol slot.
   const node: ReactiveInternalNode<S, A> = {
     get state(): ReadonlyState<S> {
       return _trackingProxy
@@ -268,7 +303,7 @@ export function createReactiveNode<
       assertActive('create a child on')
       const childNode = createReactiveNode<CS, CA>(
         childDef,
-        node as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>,
+        node as unknown as Owner,
         scope
       )
       _children.add(childNode as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
@@ -287,12 +322,15 @@ export function createReactiveNode<
 
       // Detach from owner.
       if (!('_tag' in owner && owner._tag === HOME_OWNER_TAG)) {
-        (owner as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
-          ._removeChild(node as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
+        // Owner is another ReactiveNode — call _removeChild via the internal slot.
+        const ownerNode = owner as unknown as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>
+        ownerNode[REACTIVE_NODE_INTERNAL]._removeChild(
+          node as unknown as ReactiveNode<StateRecord, ActionsMap<StateRecord>>
+        )
       } else {
         const homeRemoveFn = (owner as ReactiveHomeOwnerInternal)._removeRoot
         if (typeof homeRemoveFn === 'function') {
-          homeRemoveFn(node as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
+          homeRemoveFn(node as unknown as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
         }
       }
 
@@ -302,16 +340,9 @@ export function createReactiveNode<
       _lifecycle = 'destroyed'
     },
 
-    _removeChild(child: ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>): void {
-      _children.delete(child)
-    },
-
-    get _owner(): Owner {
-      return owner
-    },
-
-    get _lifecycle(): LifecycleState {
-      return _lifecycle
+    // The internal slot — Symbol-keyed, not enumerable on the object.
+    get [REACTIVE_NODE_INTERNAL](): ReactiveNodeInternalSlot {
+      return internalSlot
     },
   }
 

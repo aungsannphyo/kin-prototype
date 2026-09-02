@@ -8,6 +8,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHome } from '../src/index.js'
+import type { InternalNode, StateRecord, ActionsMap } from '../src/types.js'
+
+// Helper: cast a public Node reference to InternalNode to access framework-
+// internal invariants in Phase A tests. This is a framework-test-only pattern;
+// consumer code must never access internal members.
+function asInternal(n: unknown): InternalNode<StateRecord, ActionsMap<StateRecord>> {
+  return n as InternalNode<StateRecord, ActionsMap<StateRecord>>
+}
 
 // ---------------------------------------------------------------------------
 // Test 1 — Create Home
@@ -192,7 +200,7 @@ describe('Test 8 — Child destruction', () => {
     b.destroy()
 
     assert.equal(a.isParent, false, 'A should no longer be a parent after B is destroyed')
-    assert.equal(b._lifecycle, 'destroyed')
+    assert.equal(asInternal(b)._lifecycle, 'destroyed')
   })
 })
 
@@ -210,10 +218,10 @@ describe('Test 9 — Cascade destruction', () => {
 
     a.destroy()
 
-    assert.equal(a._lifecycle, 'destroyed', 'A destroyed')
-    assert.equal(b._lifecycle, 'destroyed', 'B destroyed')
-    assert.equal(c._lifecycle, 'destroyed', 'C destroyed')
-    assert.equal(d._lifecycle, 'destroyed', 'D destroyed')
+    assert.equal(asInternal(a)._lifecycle, 'destroyed', 'A destroyed')
+    assert.equal(asInternal(b)._lifecycle, 'destroyed', 'B destroyed')
+    assert.equal(asInternal(c)._lifecycle, 'destroyed', 'C destroyed')
+    assert.equal(asInternal(d)._lifecycle, 'destroyed', 'D destroyed')
   })
 
   it('post-order: children are destroyed before their parent', () => {
@@ -230,9 +238,9 @@ describe('Test 9 — Cascade destruction', () => {
     // Confirm lifecycle order by checking that after a.destroy(),
     // deeper nodes are also destroyed (implies children-first traversal worked).
     a.destroy()
-    assert.equal(c._lifecycle, 'destroyed')
-    assert.equal(b._lifecycle, 'destroyed')
-    assert.equal(a._lifecycle, 'destroyed')
+    assert.equal(asInternal(c)._lifecycle, 'destroyed')
+    assert.equal(asInternal(b)._lifecycle, 'destroyed')
+    assert.equal(asInternal(a)._lifecycle, 'destroyed')
 
     // Unused variable suppressor
     void order
@@ -294,8 +302,8 @@ describe('Test 12 — Destroy is idempotent', () => {
       a.destroy()  // second call must be a no-op
     })
 
-    assert.equal(a._lifecycle, 'destroyed')
-    assert.equal(b._lifecycle, 'destroyed')
+    assert.equal(asInternal(a)._lifecycle, 'destroyed')
+    assert.equal(asInternal(b)._lifecycle, 'destroyed')
   })
 })
 
@@ -328,7 +336,7 @@ describe('Invariant 1 — Single owner (no re-parenting API means single owner i
 
     // There is no API to transfer ownership — verify the invariant by confirming
     // that C's owner is A (not B) and there is no way to change it.
-    assert.equal(c._owner, a, 'C owner must be A')
+    assert.equal(asInternal(c)._owner, a, 'C owner must be A')
     assert.equal(c.isChild, true)
 
     // B has no children.
@@ -352,8 +360,8 @@ describe('Invariant 2 — No ownership cycles', () => {
     const b = a.child({})
     const c = b.child({})
     // No re-parenting API exists — this test simply documents the guarantee.
-    assert.equal(c._owner, b)
-    assert.equal(b._owner, a)
+    assert.equal(asInternal(c)._owner, b)
+    assert.equal(asInternal(b)._owner, a)
     // No path to make c own a.
     assert.equal(a.isChild, false)
   })
@@ -424,7 +432,7 @@ describe('Invariant 6 — Cascade: destroying parent destroys all descendants', 
     a.destroy()
 
     for (const n of [a, b1, b2, b3, c1, c2, c3]) {
-      assert.equal(n._lifecycle, 'destroyed')
+      assert.equal(asInternal(n)._lifecycle, 'destroyed')
     }
   })
 })
@@ -477,9 +485,9 @@ describe('Home.destroy() — cascades to all root nodes', () => {
 
     home.destroy()
 
-    assert.equal(a._lifecycle, 'destroyed')
-    assert.equal(b._lifecycle, 'destroyed')
-    assert.equal(c._lifecycle, 'destroyed')
+    assert.equal(asInternal(a)._lifecycle, 'destroyed')
+    assert.equal(asInternal(b)._lifecycle, 'destroyed')
+    assert.equal(asInternal(c)._lifecycle, 'destroyed')
   })
 
   it('creating a node on a destroyed Home throws', () => {

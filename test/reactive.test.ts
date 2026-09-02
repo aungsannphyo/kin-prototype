@@ -10,6 +10,15 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createReactiveHome } from '../src/index.js'
+import type { ReactiveInternalNode } from '../src/reactive-node.js'
+import { REACTIVE_NODE_INTERNAL } from '../src/reactive-node.js'
+import type { StateRecord, ActionsMap } from '../src/types.js'
+
+// Helper: cast a public ReactiveNode to ReactiveInternalNode to access
+// framework-internal invariants in Phase B tests.
+function asInternal(n: unknown): ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>> {
+  return n as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -833,7 +842,7 @@ describe('Extra — home.destroy() stops all subscriptions', () => {
 
     home.destroy()
 
-    assert.equal(node._lifecycle, 'destroyed')
+    assert.equal(asInternal(node)[REACTIVE_NODE_INTERNAL]._lifecycle, 'destroyed')
     assert.throws(() => node.actions.set(1), /destroyed/i)
     assert.equal(runCount, 1)
   })

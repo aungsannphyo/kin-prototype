@@ -13,7 +13,7 @@ export { createHome } from './home.js'
 
 export type {
   Home,
-  InternalNode as Node,
+  Node,
   NodeDefinition,
   ActionContext,
   ActionsMap,

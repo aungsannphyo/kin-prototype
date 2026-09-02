@@ -15,6 +15,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createReactiveHome } from '../src/index.js'
+import { REACTIVE_NODE_INTERNAL, type ReactiveInternalNode } from '../src/reactive-node.js'
+import type { StateRecord, ActionsMap } from '../src/types.js'
+
+// Helper: cast a public ReactiveNode to ReactiveInternalNode for tests that
+// need to verify internal invariants through the Symbol slot.
+function asInternal(n: unknown): ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>> {
+  return n as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>
+}
 
 // ---------------------------------------------------------------------------
 // FIX 1 — Sealed internals
@@ -264,6 +272,136 @@ describe('FIX 2 — Mutating proxy lifecycle guard', () => {
 
     await home.flush()
     assert.equal(runs, 0, 'subscriber must NOT run after blocked proxy write')
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Public API boundary — internal members must not appear on ReactiveNode
+// ---------------------------------------------------------------------------
+
+describe('API boundary — _owner, _lifecycle, _removeChild absent from public ReactiveNode', () => {
+  it('_owner is not on the public node', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { x: 0 } }) as unknown as Record<string, unknown>
+    assert.equal('_owner' in node, false, '_owner must not exist on public ReactiveNode')
+    home.destroy()
+  })
+
+  it('_lifecycle is not on the public node', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { x: 0 } }) as unknown as Record<string, unknown>
+    assert.equal('_lifecycle' in node, false, '_lifecycle must not exist on public ReactiveNode')
+    home.destroy()
+  })
+
+  it('_removeChild is not on the public node', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { x: 0 } }) as unknown as Record<string, unknown>
+    assert.equal('_removeChild' in node, false, '_removeChild must not exist on public ReactiveNode')
+    home.destroy()
+  })
+
+  it('the public ReactiveNode only exposes legitimate framework capabilities', () => {
+    const home = createReactiveHome()
+    const node = home.node({
+      state: { balance: 0 },
+      actions: { set(ctx, v: number) { ctx.state.balance = v } },
+    })
+
+    // These must all be accessible on the public type.
+    assert.equal(typeof node.state, 'object')
+    assert.equal(typeof node.actions.set, 'function')
+    assert.equal(typeof node.isParent, 'boolean')
+    assert.equal(typeof node.isChild, 'boolean')
+    assert.equal(typeof node.child, 'function')
+    assert.equal(typeof node.destroy, 'function')
+
+    // These must NOT be accessible.
+    const n = node as unknown as Record<string, unknown>
+    assert.equal(n['_owner'],       undefined, '_owner must be absent')
+    assert.equal(n['_lifecycle'],   undefined, '_lifecycle must be absent')
+    assert.equal(n['_removeChild'], undefined, '_removeChild must be absent')
+    assert.equal(n['_scope'],       undefined, '_scope must be absent')
+    assert.equal(n['_nodeId'],      undefined, '_nodeId must be absent')
+
+    home.destroy()
+  })
+
+  it('TypeScript prevents accessing _owner, _lifecycle, _removeChild at compile time', () => {
+    // This test documents the compile-time guarantee.
+    // The following would be TS errors if uncommented (tsc --noEmit catches them):
+    //   node._owner          // TS: Property '_owner' does not exist on 'ReactiveNode<...>'
+    //   node._lifecycle      // TS: Property '_lifecycle' does not exist on 'ReactiveNode<...>'
+    //   node._removeChild()  // TS: Property '_removeChild' does not exist on 'ReactiveNode<...>'
+    //
+    // Runtime: verify the string-keyed names are absent from the object.
+    const home = createReactiveHome()
+    const node = home.node({ state: { v: 0 } })
+
+    assert.equal(typeof (node as unknown as Record<string, unknown>)['_lifecycle'], 'undefined')
+    assert.equal(typeof (node as unknown as Record<string, unknown>)['_owner'],     'undefined')
+    assert.equal(typeof (node as unknown as Record<string, unknown>)['_removeChild'], 'undefined')
+
+    home.destroy()
+  })
+
+  it('internal state IS accessible through the Symbol slot to framework code', () => {
+    // This verifies the two-layer design: string-keyed names are absent,
+    // but the Symbol slot exists and correctly exposes _owner and _lifecycle.
+    const home = createReactiveHome()
+    const parent = home.node({})
+    const child = parent.child({})
+
+    const slot = asInternal(child)[REACTIVE_NODE_INTERNAL]
+
+    // _owner points to the parent node.
+    assert.equal(slot._owner, parent, '_owner via Symbol slot must point to parent')
+
+    // _lifecycle reflects current lifecycle state.
+    assert.equal(slot._lifecycle, 'active', '_lifecycle via Symbol slot must be active')
+
+    child.destroy()
+    assert.equal(slot._lifecycle, 'destroyed', '_lifecycle via Symbol slot must update after destroy')
+
+    home.destroy()
+  })
+
+  it('parent/child roles still work correctly after the type split', () => {
+    // Functional regression: the public type split must not break role derivation.
+    const home = createReactiveHome()
+    const parent = home.node({})
+    const child = parent.child({})
+
+    assert.equal(parent.isParent, true)
+    assert.equal(parent.isChild, false)
+    assert.equal(child.isParent, false)
+    assert.equal(child.isChild, true)
+
+    child.destroy()
+    assert.equal(parent.isParent, false)
+
+    home.destroy()
+  })
+
+  it('reactive subscriptions still work after the type split', async () => {
+    // End-to-end reactive regression via the public ReactiveNode type.
+    const home = createReactiveHome()
+    const node = home.node({
+      state: { count: 0 },
+      actions: { inc(ctx) { ctx.state.count++ } },
+    })
+
+    let runs = 0
+    home.subscribe(() => { runs++; void node.state.count })
+    runs = 0
+
+    node.actions.inc()
+    await home.flush()
+
+    assert.equal(runs, 1)
+    assert.equal(node.state.count, 1)
+
     home.destroy()
   })
 })

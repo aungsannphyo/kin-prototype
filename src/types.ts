@@ -94,11 +94,14 @@ export type Owner = HomeOwner | InternalNode<StateRecord, ActionsMap<StateRecord
 export type LifecycleState = 'active' | 'destroyed'
 
 // ---------------------------------------------------------------------------
-// Internal node interface — used between home.ts and node.ts.
-// Not exported from index.ts.
+// Node — PUBLIC consumer-facing interface
+//
+// Exposes only framework concepts a consumer legitimately needs.
+// Internal implementation details (_owner, _lifecycle, _removeChild) are
+// NOT part of this surface.
 // ---------------------------------------------------------------------------
 
-export interface InternalNode<
+export interface Node<
   S extends StateRecord,
   A extends ActionsMap<S>,
 > {
@@ -120,11 +123,30 @@ export interface InternalNode<
   /** Create a child node owned by this node. */
   child<CS extends StateRecord, CA extends ActionsMap<CS>>(
     def: NodeDefinition<CS, CA>
+  ): Node<CS, CA>
+}
+
+// ---------------------------------------------------------------------------
+// InternalNode — framework-internal interface
+//
+// Extends the public Node with members needed by the runtime implementation.
+// NOT exported from index.ts. Internal code (home.ts, node.ts, reactive-node.ts)
+// uses this type directly. Tests that verify internal invariants must import
+// this type explicitly from types.ts, not through the public index.
+// ---------------------------------------------------------------------------
+
+export interface InternalNode<
+  S extends StateRecord,
+  A extends ActionsMap<S>,
+> extends Node<S, A> {
+  // Override child() to return InternalNode so internal callers get the full type.
+  child<CS extends StateRecord, CA extends ActionsMap<CS>>(
+    def: NodeDefinition<CS, CA>
   ): InternalNode<CS, CA>
 
   // -------------------------------------------------------------------------
   // Internal surface — prefixed with _ to signal framework-internal use.
-  // NOT part of the public API contract exported to users.
+  // NOT part of the public Node API exported to consumers.
   // -------------------------------------------------------------------------
 
   /** Remove a child from this node's children list (called during child destroy). */
@@ -148,7 +170,7 @@ export interface Home {
    */
   node<S extends StateRecord, A extends ActionsMap<S>>(
     def: NodeDefinition<S, A>
-  ): InternalNode<S, A>
+  ): Node<S, A>
 
   /**
    * Destroy Home and all root nodes it owns.
@@ -165,12 +187,14 @@ import type { Subscriber } from './reactive.js'
 // implementation detail. Exposing it would allow consumers to call
 // scope.notifyField() directly, bypassing the Action boundary.
 import type {
-  ReactiveInternalNode,
+  ReactiveNode,
   ReactiveNodeDefinition,
 } from './reactive-node.js'
 
 export type { Subscriber }
-export type { ReactiveInternalNode as ReactiveNode, ReactiveNodeDefinition }
+// Export the PUBLIC ReactiveNode type only.
+// ReactiveInternalNode is NOT exported — it is framework-internal.
+export type { ReactiveNode, ReactiveNodeDefinition }
 
 // ---------------------------------------------------------------------------
 // ReactiveHome — same shape as Home but creates ReactiveNodes
@@ -182,7 +206,7 @@ export interface ReactiveHome {
    */
   node<S extends StateRecord, A extends ActionsMap<S>>(
     def: ReactiveNodeDefinition<S, A>
-  ): ReactiveInternalNode<S, A>
+  ): ReactiveNode<S, A>
 
   /**
    * Subscribe to a reactive node.
