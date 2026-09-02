@@ -1,0 +1,15 @@
+{
+  "name": "kin-prototype",
+  "version": "0.1.0",
+  "description": "Minimal Phase A core runtime",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx/esm --test test/node.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "4.19.1",
+    "typescript": "5.5.4"
+  }
+}
