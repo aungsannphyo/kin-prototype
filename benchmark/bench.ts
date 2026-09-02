@@ -400,13 +400,13 @@ async function runS6(): Promise<void> {
   })
 
   // Warm up — one subscribe/unsubscribe outside the timed block.
-  const warmup = home.subscribe(() => { void node.state.value })
+  const warmup = home.subscribe(() => { return node.state.value })
   home.unsubscribe(warmup)
 
   const t0 = performance.now()
 
   for (let i = 0; i < SUB_COUNT; i++) {
-    home.subscribe(() => { void node.state.value })
+    home.subscribe(() => { return node.state.value; })
   }
 
   const elapsed = performance.now() - t0
