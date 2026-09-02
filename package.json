@@ -1,7 +1,7 @@
 {
   "name": "kin-prototype",
   "version": "0.1.0",
-  "description": "Minimal Phase A core runtime",
+  "description": "Kin framework prototype — Phase A (core runtime) + Phase B (reactivity)",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

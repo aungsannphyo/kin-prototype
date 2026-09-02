@@ -12,8 +12,8 @@
  *     Expected: exactly 5,000 subscriber executions (one per subscriber per mutation).
  *
  * S2  1,000 nodes × 5 subscribers each  = 5,000 subscriptions
- *     Mutate ONE node 10,000 times (10,000 mutations, batched per flush cycle).
- *     Expected: exactly 5 subscriber executions per flush cycle  ×  10,000 cycles
+ *     Mutate ONE node 10,000 times — one mutation per flush cycle (NOT batched).
+ *     Expected: exactly 5 subscriber executions per flush cycle × 10,000 cycles
  *               = 50,000 executions total.
  *     The other 4,995 subscribers must never run.
  *
@@ -188,7 +188,9 @@ async function runS2(): Promise<void> {
 
   const t0 = performance.now()
 
-  // 10,000 individual mutations, each flushed immediately.
+  // 10,000 individual mutations — each mutation is followed by an immediate
+  // flush, so these are NOT batched. Each cycle: 1 mutation → 1 flush →
+  // 5 subscriber executions. Total expected: 10,000 × 5 = 50,000 executions.
   for (let m = 0; m < MUTATIONS; m++) {
     nodes[TARGET].actions.set(m + 1)
     await home.flush()
@@ -374,6 +376,51 @@ async function runS5(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario S6 — Subscription creation baseline
+//
+// Purpose: measure the cost of creating subscribers BEFORE Phase C adds any
+// authorization overhead. This is the Phase B baseline that Phase C will
+// compare against to quantify the cost of Grant authorization checks.
+//
+// Metrics:
+//  - total time to create 5,000 subscribers
+//  - average time per subscriber creation (µs)
+//  - subscriber count confirmed correct at the end
+// ---------------------------------------------------------------------------
+
+async function runS6(): Promise<void> {
+  section('S6 — Subscription creation baseline (5,000 subscribers)')
+
+  const SUB_COUNT = 5_000
+
+  const home = createReactiveHome()
+  const node = home.node({
+    state: { value: 0 },
+    actions: { set(ctx, v: number) { ctx.state.value = v } },
+  })
+
+  // Warm up — one subscribe/unsubscribe outside the timed block.
+  const warmup = home.subscribe(() => { void node.state.value })
+  home.unsubscribe(warmup)
+
+  const t0 = performance.now()
+
+  for (let i = 0; i < SUB_COUNT; i++) {
+    home.subscribe(() => { void node.state.value })
+  }
+
+  const elapsed = performance.now() - t0
+  const avgMicros = (elapsed / SUB_COUNT) * 1_000
+
+  row('Subscribers created', SUB_COUNT)
+  row('Total time (ms)', fmt(elapsed))
+  row('Average per subscribe (µs)', fmt(avgMicros, 3))
+  row('Note', 'Phase C baseline — compare authorization overhead against this')
+
+  home.destroy()
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -388,6 +435,7 @@ await runS2()
 await runS3()
 await runS4()
 await runS5()
+await runS6()
 
 console.log(`\n${'═'.repeat(60)}`)
 console.log('  Benchmark complete.')

@@ -66,14 +66,14 @@ export interface ReactiveInternalNode<
   ): ReactiveInternalNode<CS, CA>
 
   // ---------- Internal surface ---------------------------------------------
+  // These members are framework-internal. They use the _ prefix as a
+  // convention signal. _scope and _nodeId are intentionally NOT part of
+  // this interface — they were removed to prevent consumers from calling
+  // scope.notifyField() or scope.trackField() directly and bypassing the
+  // Action boundary / future Grant authorization.
   _removeChild(child: ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>): void
   readonly _owner: Owner
   readonly _lifecycle: LifecycleState
-  /** The scope this node belongs to — exposed so reactive-home.ts can pass
-   *  the same scope to child nodes. */
-  readonly _scope: ReactiveScope
-  /** The unique node-level prefix used to build field keys, e.g. "n3". */
-  readonly _nodeId: string
 }
 
 export type ReactiveNodeDefinition<
@@ -136,29 +136,35 @@ function makeTrackingReadonlyProxy<S extends StateRecord>(
 /**
  * Build the ACTION-INTERNAL mutation proxy.
  *
- * get  — plain read from raw (also tracks if a subscriber is running,
- *        though actions are normally not run inside subscribers)
- * set  — Object.is check → write → notifyField
+ * get  — plain read from raw (also tracks if a subscriber is running)
+ * set  — lifecycle guard → Object.is check → write → notifyField
+ * deleteProperty — lifecycle guard → reject (state shape must not change)
  *
- * This proxy is created once per node and passed as ctx.state inside every
- * action on this node.  It always has write access — Phase A lifecycle guards
- * (assertActive) happen BEFORE the action function body runs.
+ * NOTE: No defineProperty trap here. Reflect.set internally calls
+ * [[DefineOwnProperty]] for new properties on a Proxy target; adding a
+ * defineProperty trap would intercept those internal calls and break
+ * normal assignment. The set trap's lifecycle guard is sufficient protection.
  */
 function makeMutatingProxy<S extends StateRecord>(
   raw: S,
   nodeId: string,
-  scope: ReactiveScope
+  scope: ReactiveScope,
+  getLifecycle: () => LifecycleState
 ): S {
   return new Proxy(raw, {
     get(target, prop, receiver) {
-      // Track reads even inside actions so that if an action reads a field
-      // and a subscriber is currently watching it works correctly.
       if (typeof prop === 'string') {
         scope.trackField(`${nodeId}:${prop}`)
       }
       return Reflect.get(target, prop, receiver)
     },
     set(target, prop, value, receiver) {
+      if (getLifecycle() === 'destroyed') {
+        throw new Error(
+          `Cannot mutate state: node "${nodeId}" has been destroyed. ` +
+          `A reference to ctx.state must not be used after the action completes.`
+        )
+      }
       if (typeof prop === 'string') {
         const fieldKey = `${nodeId}:${prop}`
         const prev = Reflect.get(target, prop, receiver)
@@ -170,6 +176,16 @@ function makeMutatingProxy<S extends StateRecord>(
         return result
       }
       return Reflect.set(target, prop, value, receiver)
+    },
+    deleteProperty(_target, prop) {
+      if (getLifecycle() === 'destroyed') {
+        throw new Error(
+          `Cannot delete state property "${String(prop)}": node "${nodeId}" has been destroyed.`
+        )
+      }
+      throw new TypeError(
+        `Cannot delete state property "${String(prop)}" — state shape must not change.`
+      )
     },
   }) as S
 }
@@ -194,8 +210,8 @@ export function createReactiveNode<
   // -- Proxies --------------------------------------------------------------
   // Public: readonly + tracking
   const _trackingProxy = makeTrackingReadonlyProxy(_rawState, nodeId, scope)
-  // Action-internal: mutable + notifying
-  const _mutatingProxy = makeMutatingProxy(_rawState, nodeId, scope)
+  // Action-internal: mutable + notifying + lifecycle-guarded
+  const _mutatingProxy = makeMutatingProxy(_rawState, nodeId, scope, () => _lifecycle)
 
   // -- Children & lifecycle -------------------------------------------------
   const _children = new Set<ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>>()
@@ -296,14 +312,6 @@ export function createReactiveNode<
 
     get _lifecycle(): LifecycleState {
       return _lifecycle
-    },
-
-    get _scope(): ReactiveScope {
-      return scope
-    },
-
-    get _nodeId(): string {
-      return nodeId
     },
   }
 

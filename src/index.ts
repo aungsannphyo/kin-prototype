@@ -34,5 +34,4 @@ export type {
   ReactiveNode,
   ReactiveNodeDefinition,
   Subscriber,
-  ReactiveScope,
 } from './types.js'

@@ -161,7 +161,9 @@ export interface Home {
 // ===========================================================================
 
 import type { Subscriber } from './reactive.js'
-export type { ReactiveScope } from './reactive.js'
+// ReactiveScope is intentionally NOT re-exported — it is an internal
+// implementation detail. Exposing it would allow consumers to call
+// scope.notifyField() directly, bypassing the Action boundary.
 import type {
   ReactiveInternalNode,
   ReactiveNodeDefinition,

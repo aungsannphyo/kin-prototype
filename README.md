@@ -2,7 +2,7 @@
 
 A minimal frontend UI framework built from scratch around a **family/relationship mental model**.
 
-This repository contains the **Phase A core runtime** — the foundational layer that everything else will be built on top of.
+This repository is an active prototype. Phases A and B are complete. Phase C (Relationship + Grant) is next.
 
 ---
 
@@ -15,7 +15,8 @@ Home
  └── Node
       ├── State
       ├── Actions
-      └── Children
+      ├── Children
+      └── Reactivity (Phase B)
 ```
 
 `Parent` and `Child` are **not** classes or types. They are **dynamic roles** derived from ownership:
@@ -43,9 +44,26 @@ Home
 
 ---
 
-## Phase A — What Was Built
+## Entry Point Decision — `createHome` vs `createReactiveHome`
 
-### Core Primitives
+There are two Home factories in the codebase:
+
+| Factory | Status | When to use |
+|---|---|---|
+| `createReactiveHome()` | **Active — use this** | All new code. Phase C, Phase D, and all future framework development build on this. |
+| `createHome()` | **Retained — non-reactive only** | Low-level testing and Phase A contract verification. Not intended for application code. |
+
+`createHome()` is kept because it validates the ownership/lifecycle invariants independently of reactivity. Its tests serve as a correctness baseline for the Node model. However, it is **not** the entry point for application development and will not be extended in future phases.
+
+If you are building application code, use `createReactiveHome()`.
+
+---
+
+## Phase A — Core Runtime
+
+Implemented and stable. No further changes planned.
+
+### Primitives
 
 | Primitive | Description |
 |---|---|
@@ -56,72 +74,96 @@ Home
 | `Lifecycle` | `active → destroyed`. Nodes cannot mutate, create children, or invoke actions after destruction. |
 | `Cascade Destroy` | Post-order destruction — children are destroyed before their parent. |
 
+### Key Design Rules
+
+- **Single owner** — a Node has exactly one owner (either Home or another Node). No re-parenting API.
+- **Action-only mutation** — `node.state` is a readonly Proxy outside of an Action. Direct assignment throws a `TypeError` at runtime.
+- **Cascade destruction** — destroying a Node destroys all descendants first (post-order), then detaches from its owner.
+- **Dynamic roles** — `isParent` and `isChild` are derived getters, not stored booleans.
+- **No `any`** — generics throughout. State type `S` flows from definition to `ctx.state` and `node.state`.
+
+---
+
+## Phase B — Fine-Grained Reactivity
+
+Implemented and hardened. Built on top of Phase A.
+
+### How It Works
+
+```
+Action mutates ctx.state.field
+    → Object.is(prev, next) — skip if equal
+    → scope.notifyField("nodeId:field")
+    → FieldSubscriberIndex lookup  O(1)
+    → affected subscribers scheduled
+    → microtask flush
+    → subscribers re-run, dependencies rebuilt
+```
+
+State updates never traverse the ownership tree or any relationship graph.
+
 ### API
 
 ```ts
-import { createHome } from 'kin-prototype'
+import { createReactiveHome } from 'kin-prototype'
 
-// Create a Home
-const home = createHome()
+const home = createReactiveHome()
 
-// Create a root Node
 const account = home.node({
-  state: {
-    balance: 100,
-  },
+  state: { balance: 100 },
   actions: {
-    deposit(ctx, amount: number) {
-      ctx.state.balance += amount
-    },
-    withdraw(ctx, amount: number) {
-      ctx.state.balance -= amount
-    },
+    deposit(ctx, amount: number) { ctx.state.balance += amount },
+    withdraw(ctx, amount: number) { ctx.state.balance -= amount },
   },
 })
 
-// Create a child Node
 const transaction = account.child({
-  state: {
-    amount: 0,
-  },
+  state: { amount: 0 },
   actions: {
-    setAmount(ctx, amount: number) {
-      ctx.state.amount = amount
-    },
+    setAmount(ctx, amount: number) { ctx.state.amount = amount },
   },
 })
 
-// Read state (readonly)
+// Read state (readonly — throws on direct write)
 account.state.balance         // 100
+account.state.balance = 999   // TypeError
 
 // Mutate via actions only
 account.actions.deposit(50)
 account.state.balance         // 150
 
-// Direct mutation throws at runtime
-account.state.balance = 999   // TypeError
+// Subscribe — callback runs immediately, re-runs when deps change
+const sub = home.subscribe(() => {
+  console.log('balance:', account.state.balance)
+})
 
-// Dynamic roles
-account.isParent              // true
-account.isChild               // false (owned by Home)
-transaction.isParent          // false
-transaction.isChild           // true  (owned by account)
+// Unsubscribe
+home.unsubscribe(sub)
 
-// Destroy (cascades to all descendants)
+// Await flush (useful in tests)
+await home.flush()
+
+// Destroy (cascades to all descendants, cleans all subscriptions)
 account.destroy()
-// transaction is also destroyed
-
-// Idempotent — second call is a no-op
-account.destroy()
+home.destroy()
 ```
 
-### Key Design Rules
+### Reactivity Properties
 
-- **Single owner** — a Node has exactly one owner (either Home or another Node). There is no re-parenting API.
-- **Action-only mutation** — `node.state` is a readonly Proxy outside of an Action. Direct assignment throws a `TypeError` at runtime.
-- **Cascade destruction** — destroying a Node destroys all its descendants first (post-order), then detaches from its owner.
-- **Dynamic roles** — `isParent` and `isChild` are derived getters, not stored booleans. They update automatically as the tree changes.
-- **No `any`** — the entire implementation uses TypeScript generics. State type `S` flows from the node definition through to `ctx.state` and `node.state`.
+- **Field-level tracking** — dependencies are tracked at the `nodeId:fieldName` level
+- **Auto-tracking** — reading `node.state.field` inside a subscriber registers the dep automatically
+- **Dynamic deps** — dep set is rebuilt from scratch on every subscriber re-run
+- **Batching** — multiple mutations before a flush → subscriber runs once per flush
+- **Object.is equality** — same-value assignments do not notify
+- **No tree traversal** — state update cost is O(subscribers for that field), independent of node count
+- **Cascade cleanup** — destroying a node disposes all its field subscriptions
+
+### Security Boundaries
+
+- `node.state` (public) is a **read-only tracking proxy** — throws `TypeError` on write
+- `ctx.state` (inside actions) is a **mutating proxy** — also checks lifecycle; throws if node is destroyed
+- The reactive scope (`ReactiveScope`) is **internal only** and not exposed through the public API
+- There is no path to call `notifyField()` or `trackField()` directly from consumer code
 
 ---
 
@@ -130,12 +172,19 @@ account.destroy()
 ```
 kin-prototype/
 ├── src/
-│   ├── types.ts      # All type contracts (StateRecord, ActionContext, InternalNode, Home, …)
-│   ├── node.ts       # createNode() — core node factory
-│   ├── home.ts       # createHome() — root container factory
-│   └── index.ts      # Public exports
+│   ├── types.ts            # Type contracts (Phase A + Phase B)
+│   ├── node.ts             # createNode() — Phase A node factory
+│   ├── home.ts             # createHome() — Phase A non-reactive entry point
+│   ├── reactive.ts         # Reactive kernel (FieldSubscriberIndex, scheduler)
+│   ├── reactive-node.ts    # createReactiveNode() — Phase B reactive node factory
+│   ├── reactive-home.ts    # createReactiveHome() — Phase B entry point
+│   └── index.ts            # Public exports
 ├── test/
-│   └── node.test.ts  # 31 tests across 22 suites
+│   ├── node.test.ts                # Phase A tests (31 tests)
+│   ├── reactive.test.ts            # Phase B tests (35 tests)
+│   └── reactive-hardening.test.ts  # Phase B hardening tests (26 tests)
+├── benchmark/
+│   └── bench.ts            # Phase B synthetic benchmark (S1–S6)
 ├── package.json
 ├── tsconfig.json
 └── .gitignore
@@ -150,69 +199,44 @@ npm install
 npm test
 ```
 
-Output:
+Expected output:
 
 ```
-ℹ tests 31
-ℹ suites 22
-ℹ pass 31
-ℹ fail 0
+ℹ tests 92+
+ℹ pass  92+
+ℹ fail  0
 ```
 
-### Test Coverage
-
-| # | Test | What it verifies |
-|---|---|---|
-| 1 | Create Home | `createHome()` returns a valid Home |
-| 2 | Create root Node | Root node has `isChild=false`, `isParent=false` |
-| 3 | Node with State | State is readable; proxy is a different reference from raw state |
-| 4 | Action mutation | `deposit` / `withdraw` mutate state correctly |
-| 5 | Direct mutation blocked | Assigning to `node.state` throws `TypeError` at runtime |
-| 6 | Child creation | `A.isParent=true`, `B.isChild=true`, `B.isParent=false` |
-| 7 | Middle Node roles | `B.isChild=true` and `B.isParent=true` simultaneously |
-| 8 | Child destruction | Destroying B removes it from A; `A.isParent` becomes false |
-| 9 | Cascade destruction | Destroying A destroys all descendants (post-order) |
-| 10 | Destroyed Node cannot mutate | Invoking an action after `destroy()` throws |
-| 11 | Destroyed Node cannot create children | Calling `child()` after `destroy()` throws |
-| 12 | Destroy is idempotent | Calling `destroy()` twice does not corrupt the runtime |
-| 13 | No re-parenting API | `move`, `reparent`, `changeOwner`, `setOwner` do not exist |
-| — | Invariants 1–8 | Single owner, no cycles, state isolation, action-only mutation, cascade, dynamic roles, Home boundary |
-| — | Home.destroy() | Cascades to all root nodes; creating on destroyed Home throws |
-
----
-
-## TypeScript
+Run typecheck:
 
 ```bash
 npm run typecheck
 ```
 
-Strict mode is fully enabled: `noImplicitAny`, `noUnusedLocals`, `noUnusedParameters`, `exactOptionalPropertyTypes`. Zero `any` is used in the implementation.
+Run benchmark:
+
+```bash
+node --import tsx/esm benchmark/bench.ts
+```
 
 ---
 
-## What Phase A Intentionally Does NOT Include
+## Completed Phases
 
-Phase A validates only the smallest possible core. The following are explicitly deferred:
-
-- View / JSX
-- Bond / Relationship / Grant
-- Reactivity / Subscriptions / Derived state
-- Async Actions
-- Re-parenting
-- Persistence / SSR
-- DevTools / Compiler
+| Phase | Status | Description |
+|---|---|---|
+| A | ✅ Complete | Home, Node, Ownership, State, Actions, Lifecycle, Cascade Destroy |
+| B | ✅ Complete | Field-level reactivity, subscribers, batching, lifecycle cleanup |
+| C | 🔜 Next | Relationship + Grant + cross-tree authorization |
 
 ---
 
 ## Deferred Findings
 
-These are concrete observations from Phase A implementation to consider in later phases:
+**Nested-path tracking** — `node.state.profile.name` registers a dep on `"profile"`, not `"profile.name"`. In-place mutation of nested objects does not notify. Replacing the whole object does. Phase C decision point.
 
-**Deep readonly state** — `ReadonlyState<S>` is shallow-readonly at the TypeScript level. Nested objects can still be mutated through the proxy at runtime. Phase B should decide whether deep freezing or a recursive proxy is needed.
+**`ReadonlyState<S>` is shallow** — TypeScript readonly does not cover nested objects. Runtime protection exists only at the top level via the proxy.
 
-**Action context extensibility** — `ActionContext<S>` is currently `{ state: S }` only. Future phases may need `ctx.dispatch`, `ctx.emit`, or `ctx.self`. The type is a named alias so adding fields is non-breaking.
+**`_lifecycle` visibility** — `_lifecycle` is on the internal node interface for test observability. A future published API should expose `node.isDestroyed` instead.
 
-**`_lifecycle` visibility** — `_lifecycle` is on the public interface (prefixed `_`) to support test observability. A published API should hide this behind a symbol or a dedicated `node.isDestroyed` getter.
-
-**Home root enumeration** — Home has no way to enumerate its root nodes from the outside. DevTools and SSR phases will likely need a `home.roots` surface.
+**Home root enumeration** — No public `home.roots` accessor. DevTools and SSR phases will need this.
