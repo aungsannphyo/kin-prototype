@@ -3,6 +3,7 @@
  *
  * Phase A  — createHome()
  * Phase B  — createReactiveHome()
+ * Phase C  — Relationship, Grant, Capability, authorization
  */
 
 // ---------------------------------------------------------------------------
@@ -35,3 +36,19 @@ export type {
   ReactiveNodeDefinition,
   Subscriber,
 } from './types.js'
+
+// ---------------------------------------------------------------------------
+// Phase C
+// ---------------------------------------------------------------------------
+
+export {
+  capability,
+  KinAuthError,
+} from './relationship.js'
+
+export type {
+  Capability,
+  Grant,
+  Relationship,
+  KinAuthErrorCode,
+} from './relationship.js'

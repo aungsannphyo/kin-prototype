@@ -1,17 +1,21 @@
 /**
- * Phase B — Reactive Home
+ * Phase B + Phase C — Reactive Home
  *
- * createReactiveHome() is the Phase B entry point.
+ * createReactiveHome() is the Phase B entry point, extended with Phase C
+ * authorization support.
  *
  * It owns:
  *  - A ReactiveScope (the reactive kernel)
  *  - A set of root ReactiveInternalNodes
+ *  - A GrantStore (Phase C: manages Relationships and Grants)
  *
  * It exposes:
  *  - node()        — creates root reactive nodes
  *  - subscribe()   — creates a subscriber in the shared scope
  *  - unsubscribe() — disposes a subscriber
  *  - flush()       — returns the current microtask flush promise (for tests)
+ *  - relationship() — creates a Relationship between two nodes (Phase C)
+ *  - subscribeAs() — cross-node authorized subscription (Phase C)
  *  - destroy()     — destroys all root nodes (cleaning their subscriptions via
  *                    disposeByPrefix), then calls scope.disposeAll() to clean
  *                    any zero-dep subscribers that have no field deps to match on.
@@ -27,9 +31,14 @@ import {
 import { createReactiveScope } from './reactive.js'
 import type { Subscriber } from './reactive.js'
 import { HOME_OWNER_TAG } from './types.js'
+import { createGrantStore } from './grant.js'
+import { authorize, linkSubscriberToGrant } from './authorization.js'
+import type { ReactiveNode } from './reactive-node.js'
+import type { Relationship } from './relationship.js'
 
 export function createReactiveHome(): ReactiveHome {
   const scope = createReactiveScope()
+  const grantStore = createGrantStore()
 
   const _roots = new Set<ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>>()
   let _destroyed = false
@@ -68,6 +77,39 @@ export function createReactiveHome(): ReactiveHome {
       return scope.flushPromise()
     },
 
+    relationship(
+      source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+      target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>
+    ): Relationship {
+      if (_destroyed) {
+        throw new Error('Cannot create a relationship on a destroyed Home.')
+      }
+      return grantStore.createRelationship(source, target)
+    },
+
+    subscribeAs(
+      source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+      target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+      run: () => void
+    ): Subscriber {
+      if (_destroyed) {
+        throw new Error('Cannot subscribe on a destroyed Home.')
+      }
+
+      // Phase C authorization check.
+      const grant = authorize(source, target, grantStore)
+
+      // Create the subscriber using the existing Phase B machinery.
+      const sub = scope.createSubscriber(run)
+
+      // Link the subscriber to the grant so that revoking the grant disposes the subscriber.
+      linkSubscriberToGrant(grant, () => {
+        scope.disposeSubscriber(sub)
+      })
+
+      return sub
+    },
+
     destroy(): void {
       if (_destroyed) return
 
@@ -78,6 +120,9 @@ export function createReactiveHome(): ReactiveHome {
         root.destroy()
       }
       _roots.clear()
+
+      // Phase C: destroy all Relationships (which revokes all Grants and their linked subscriptions).
+      grantStore.destroyAll()
 
       // BUG-2 FIX: disposeByPrefix only catches subscribers that currently have
       // a dep on the node's fields. Zero-dep subscribers (and any edge-case

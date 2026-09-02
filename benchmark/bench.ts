@@ -1,5 +1,5 @@
 /**
- * Phase B — Synthetic Benchmark
+ * Phase B + Phase C — Synthetic Benchmark
  *
  * Purpose: validate the architectural claim that state updates do NOT traverse
  * unrelated nodes.  This is a behavioural correctness benchmark, not an
@@ -26,6 +26,19 @@
  *     After 1,000 mutations (one per node, different field each time) the dep
  *     sets are rebuilt — measure total registrations across the lifecycle.
  *
+ * S5  Same-value no-op: verify 0 executions.
+ *
+ * S6  Subscription creation baseline (Phase B).
+ *
+ * C1  Phase C — Many relationships, one relevant mutation.
+ *     1,000 source nodes, 1 target node, 1,000 relationships + grants.
+ *     Mutate target once → only the 1,000 authorized subscribers run.
+ *     Validates: authorization cost is not paid on every mutation.
+ *
+ * C2  Phase C — Normal vs authorized subscription comparison.
+ *     Compare subscription creation time and mutation overhead between
+ *     normal subscribe() and authorized subscribeAs().
+ *
  * Metrics reported
  * ────────────────
  *  - wall-clock time (ms) via performance.now()
@@ -38,6 +51,7 @@
 import { performance } from 'node:perf_hooks'
 import { createReactiveHome } from '../src/index.js'
 import { createReactiveScope } from '../src/reactive.js'
+import { capability } from '../src/index.js'
 
 // ---------------------------------------------------------------------------
 // Instrumented scope wrapper
@@ -378,9 +392,8 @@ async function runS5(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Scenario S6 — Subscription creation baseline
 //
-// Purpose: measure the cost of creating subscribers BEFORE Phase C adds any
-// authorization overhead. This is the Phase B baseline that Phase C will
-// compare against to quantify the cost of Grant authorization checks.
+// Purpose: measure the cost of creating subscribers. This is the Phase B baseline
+// that Phase C compares against to quantify the cost of Grant authorization checks.
 //
 // Metrics:
 //  - total time to create 5,000 subscribers
@@ -421,14 +434,168 @@ async function runS6(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario C1 — Phase C: Many relationships, one relevant mutation
+//
+// Purpose: validate that authorization cost is not paid on every mutation.
+// Setup: 1,000 source nodes, 1 target node, 1,000 relationships + grants.
+// Mutation: Mutate target once.
+// Expected: Only the 1,000 authorized subscribers run (not 0, not all 5,001).
+// ---------------------------------------------------------------------------
+
+async function runC1(): Promise<void> {
+  section('C1 — Phase C: 1,000 relationships, 1 target mutation')
+
+  const SOURCE_COUNT = 1_000
+  const TARGET_FIELD = 'balance'
+
+  const home = createReactiveHome()
+  let executions = 0
+
+  // Create target node.
+  const target = home.node({
+    state: { balance: 100 },
+    actions: { setBalance(ctx, v: number) { ctx.state.balance = v } },
+  })
+
+  // Create source nodes and establish relationships with grants.
+  const sources = Array.from({ length: SOURCE_COUNT }, () =>
+    home.node({ state: { value: 0 } })
+  )
+
+  for (const source of sources) {
+    const rel = home.relationship(source, target)
+    const cap = capability([TARGET_FIELD])
+    rel.grant(cap)
+
+    // Authorized cross-node subscription.
+    home.subscribeAs(source, target, () => {
+      executions += 1 + (Number(target.state.balance) * 0)
+    })
+  }
+
+  // Add one unrelated subscriber on the target (no authorization).
+  home.subscribe(() => {
+    executions += 1 + (Number(target.state.balance) * 0)
+  })
+
+  executions = 0
+
+  const t0 = performance.now()
+
+  // Mutate target once.
+  target.actions.setBalance(200)
+  await home.flush()
+
+  const elapsed = performance.now() - t0
+
+  const expectedExecutions = SOURCE_COUNT + 1 // 1,000 authorized + 1 unrelated
+
+  row('Source nodes', SOURCE_COUNT)
+  row('Target nodes', 1)
+  row('Relationships', SOURCE_COUNT)
+  row('Grants', SOURCE_COUNT)
+  row('Authorized subscribers', SOURCE_COUNT)
+  row('Unrelated subscribers', 1)
+  row('Total subscribers', SOURCE_COUNT + 1)
+  row('Mutations on target', 1)
+  row('Expected executions', expectedExecutions)
+  row('Actual executions', executions)
+  row('Correct?', executions === expectedExecutions ? '✓ YES' : `✗ NO (got ${executions})`)
+  row('Wall time (ms)', fmt(elapsed))
+
+  home.destroy()
+}
+
+// ---------------------------------------------------------------------------
+// Scenario C2 — Phase C: Normal vs authorized subscription comparison
+//
+// Purpose: Compare subscription creation time and mutation overhead between
+// normal subscribe() and authorized subscribeAs().
+// ---------------------------------------------------------------------------
+
+async function runC2(): Promise<void> {
+  section('C2 — Phase C: Normal vs authorized subscription comparison')
+
+  const SUB_COUNT = 1_000
+
+  // --- Normal subscriptions (baseline) ---
+  const homeNormal = createReactiveHome()
+  const nodeNormal = homeNormal.node({
+    state: { balance: 100 },
+    actions: { setBalance(ctx, v: number) { ctx.state.balance = v } },
+  })
+
+  let normalExecutions = 0
+
+  const t0Normal = performance.now()
+  for (let i = 0; i < SUB_COUNT; i++) {
+    homeNormal.subscribe(() => {
+      normalExecutions += 1 + (Number(nodeNormal.state.balance) * 0)
+    })
+  }
+  const normalCreateTime = performance.now() - t0Normal
+
+  normalExecutions = 0
+  const t0NormalMut = performance.now()
+  nodeNormal.actions.setBalance(200)
+  await homeNormal.flush()
+  const normalMutTime = performance.now() - t0NormalMut
+
+  homeNormal.destroy()
+
+  // --- Authorized subscriptions (Phase C) ---
+  const homeAuth = createReactiveHome()
+  const source = homeAuth.node({ state: { value: 0 } })
+  const target = homeAuth.node({
+    state: { balance: 100 },
+    actions: { setBalance(ctx, v: number) { ctx.state.balance = v } },
+  })
+
+  const rel = homeAuth.relationship(source, target)
+  const cap = capability(['balance'])
+  rel.grant(cap)
+
+  let authExecutions = 0
+
+  const t0Auth = performance.now()
+  for (let i = 0; i < SUB_COUNT; i++) {
+    homeAuth.subscribeAs(source, target, () => {
+      authExecutions += 1 + (Number(target.state.balance) * 0)
+    })
+  }
+  const authCreateTime = performance.now() - t0Auth
+
+  authExecutions = 0
+  const t0AuthMut = performance.now()
+  target.actions.setBalance(200)
+  await homeAuth.flush()
+  const authMutTime = performance.now() - t0AuthMut
+
+  homeAuth.destroy()
+
+  const createOverhead = ((authCreateTime - normalCreateTime) / normalCreateTime) * 100
+  const mutOverhead = ((authMutTime - normalMutTime) / normalMutTime) * 100
+
+  row('Subscribers', SUB_COUNT)
+  row('Normal subscribe time (ms)', fmt(normalCreateTime))
+  row('Authorized subscribe time (ms)', fmt(authCreateTime))
+  row('Subscribe overhead (%)', fmt(createOverhead, 2))
+  row('Normal mutation time (ms)', fmt(normalMutTime))
+  row('Authorized mutation time (ms)', fmt(authMutTime))
+  row('Mutation overhead (%)', fmt(mutOverhead, 2))
+  row('Note', 'Authorization cost at creation, not per mutation')
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 console.log('\n╔══════════════════════════════════════════════════════════╗')
-console.log('║   KIN Phase B — Synthetic Reactive Benchmark             ║')
+console.log('║   KIN Phase B + Phase C — Synthetic Benchmark           ║')
 console.log('╚══════════════════════════════════════════════════════════╝')
 console.log('\nGoal: validate architectural claim that state updates do')
-console.log('NOT traverse unrelated nodes.\n')
+console.log('NOT traverse unrelated nodes, and that authorization cost')
+console.log('is not paid on every mutation.\n')
 
 await runS1()
 await runS2()
@@ -436,6 +603,8 @@ await runS3()
 await runS4()
 await runS5()
 await runS6()
+await runC1()
+await runC2()
 
 console.log(`\n${'═'.repeat(60)}`)
 console.log('  Benchmark complete.')

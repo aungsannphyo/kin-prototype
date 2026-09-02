@@ -190,6 +190,7 @@ import type {
   ReactiveNode,
   ReactiveNodeDefinition,
 } from './reactive-node.js'
+import type { Relationship } from './relationship.js'
 
 export type { Subscriber }
 // Export the PUBLIC ReactiveNode type only.
@@ -229,7 +230,48 @@ export interface ReactiveHome {
   flush(): Promise<void>
 
   /**
+   * Phase C — Create a Relationship between two nodes.
+   *
+   * A Relationship represents "source is connected to target" — it does NOT
+   * by itself grant access. Access is mediated by Grants issued against the
+   * Relationship.
+   *
+   * @param source Node that will seek access.
+   * @param target Node being accessed.
+   * @returns The Relationship object, which can be used to issue Grants.
+   */
+  relationship(
+    source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+    target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>
+  ): Relationship
+
+  /**
+   * Phase C — Create an authorized cross-node subscription.
+   *
+   * This performs an authorization check (requires a Relationship and an
+   * active Grant from source → target) before creating the subscription.
+   * If authorized, the subscriber behaves like a normal reactive subscriber:
+   * it runs immediately (registering deps on the target node's fields) and
+   * re-runs when those fields change.
+   *
+   * The subscription is automatically disposed if the Grant is revoked or the
+   * Relationship is destroyed.
+   *
+   * @param source Node seeking access (must have a Relationship to target).
+   * @param target Node being accessed.
+   * @param run The subscriber callback — typically reads target.state fields.
+   * @returns The Subscriber handle — pass to unsubscribe() to clean up.
+   * @throws KinAuthError if no Relationship exists or no active Grant is found.
+   */
+  subscribeAs(
+    source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+    target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+    run: () => void
+  ): Subscriber
+
+  /**
    * Destroy Home and all root nodes (and their subscriptions).
+   * Phase C: also destroys all Relationships and Grants.
    */
   destroy(): void
 }

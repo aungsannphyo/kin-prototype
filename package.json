@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx/esm --test test/node.test.ts test/reactive.test.ts"
+    "test": "node --import tsx/esm --test test/node.test.ts test/reactive.test.ts test/reactive-hardening.test.ts test/phase-b-gate.test.ts test/phase-c.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

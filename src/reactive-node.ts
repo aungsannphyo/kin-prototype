@@ -54,6 +54,21 @@ export interface ReactiveNodeInternalSlot {
   readonly _owner: Owner
   readonly _lifecycle: LifecycleState
   _removeChild(child: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): void
+
+  /**
+   * Phase C — destroy hooks.
+   *
+   * Framework-internal code (e.g. the Grant/Relationship system) can register
+   * callbacks here that are called synchronously when the node is destroyed.
+   * This allows Phase C to clean up Relationships and Grants tied to a node
+   * without modifying the public Node API or the destroy() method signature.
+   *
+   * Callbacks are called AFTER children are destroyed but BEFORE the node's
+   * own lifecycle transitions to 'destroyed'.
+   *
+   * NOT part of the public Node interface.
+   */
+  readonly _onDestroy: Set<() => void>
 }
 
 // ---------------------------------------------------------------------------
@@ -270,12 +285,14 @@ export function createReactiveNode<
   // -- Internal slot --------------------------------------------------------
   // Stored under the module-private REACTIVE_NODE_INTERNAL Symbol.
   // Not visible via string-keyed enumeration or `in` checks.
+  const _onDestroyHooks = new Set<() => void>()
   const internalSlot: ReactiveNodeInternalSlot = {
     get _owner(): Owner { return owner },
     get _lifecycle(): LifecycleState { return _lifecycle },
     _removeChild(child: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): void {
       _children.delete(child as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
     },
+    get _onDestroy(): Set<() => void> { return _onDestroyHooks },
   }
 
   // -- Public node object ---------------------------------------------------
@@ -332,6 +349,14 @@ export function createReactiveNode<
         if (typeof homeRemoveFn === 'function') {
           homeRemoveFn(node as unknown as ReactiveInternalNode<StateRecord, ActionsMap<StateRecord>>)
         }
+      }
+
+      // Phase C — fire destroy hooks (Relationship/Grant cleanup).
+      // Snapshot to avoid mutation-during-iteration if a hook removes itself.
+      const hooks = [..._onDestroyHooks]
+      _onDestroyHooks.clear()
+      for (const hook of hooks) {
+        hook()
       }
 
       // Clean all subscriptions that depend on this node's fields.

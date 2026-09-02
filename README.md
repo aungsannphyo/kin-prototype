@@ -2,7 +2,7 @@
 
 A minimal frontend UI framework built from scratch around a **family/relationship mental model**.
 
-This repository is an active prototype. Phases A and B are complete. Phase C (Relationship + Grant) is next.
+This repository is an active prototype. Phases A, B, and C are complete.
 
 ---
 
@@ -16,17 +16,18 @@ Home
       ├── State
       ├── Actions
       ├── Children
-      └── Reactivity (Phase B)
+      ├── Reactivity (Phase B)
+      └── Relationships (Phase C)
 ```
 
 `Parent` and `Child` are **not** classes or types. They are **dynamic roles** derived from ownership:
 
-| Situation | Role |
-|---|---|
-| Node owned by Home | `isChild === false` |
-| Node owned by another Node | `isChild === true` |
-| Node owns one or more Nodes | `isParent === true` |
-| Node owns no Nodes | `isParent === false` |
+| Situation                   | Role                 |
+| --------------------------- | -------------------- |
+| Node owned by Home          | `isChild === false`  |
+| Node owned by another Node  | `isChild === true`   |
+| Node owns one or more Nodes | `isParent === true`  |
+| Node owns no Nodes          | `isParent === false` |
 
 A Node can be both Parent and Child simultaneously (a "middle" node in the tree).
 
@@ -48,10 +49,10 @@ Home
 
 There are two Home factories in the codebase:
 
-| Factory | Status | When to use |
-|---|---|---|
-| `createReactiveHome()` | **Active — use this** | All new code. Phase C, Phase D, and all future framework development build on this. |
-| `createHome()` | **Retained — non-reactive only** | Low-level testing and Phase A contract verification. Not intended for application code. |
+| Factory                | Status                           | When to use                                                                             |
+| ---------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
+| `createReactiveHome()` | **Active — use this**            | All new code. Phase C, Phase D, and all future framework development build on this.     |
+| `createHome()`         | **Retained — non-reactive only** | Low-level testing and Phase A contract verification. Not intended for application code. |
 
 `createHome()` is kept because it validates the ownership/lifecycle invariants independently of reactivity. Its tests serve as a correctness baseline for the Node model. However, it is **not** the entry point for application development and will not be extended in future phases.
 
@@ -65,14 +66,14 @@ Implemented and stable. No further changes planned.
 
 ### Primitives
 
-| Primitive | Description |
-|---|---|
-| `Home` | Root container. Creates and owns root-level Nodes. Not a Node itself. |
-| `Node<S>` | Generic node with optional State, optional Actions, and zero or more children. |
-| `State` | Plain object owned by exactly one Node. Public surface is readonly. |
-| `Actions` | The only mutation boundary. Actions receive a mutable `ctx.state`. |
-| `Lifecycle` | `active → destroyed`. Nodes cannot mutate, create children, or invoke actions after destruction. |
-| `Cascade Destroy` | Post-order destruction — children are destroyed before their parent. |
+| Primitive         | Description                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------ |
+| `Home`            | Root container. Creates and owns root-level Nodes. Not a Node itself.                            |
+| `Node<S>`         | Generic node with optional State, optional Actions, and zero or more children.                   |
+| `State`           | Plain object owned by exactly one Node. Public surface is readonly.                              |
+| `Actions`         | The only mutation boundary. Actions receive a mutable `ctx.state`.                               |
+| `Lifecycle`       | `active → destroyed`. Nodes cannot mutate, create children, or invoke actions after destruction. |
+| `Cascade Destroy` | Post-order destruction — children are destroyed before their parent.                             |
 
 ### Key Design Rules
 
@@ -105,47 +106,53 @@ State updates never traverse the ownership tree or any relationship graph.
 ### API
 
 ```ts
-import { createReactiveHome } from 'kin-prototype'
+import { createReactiveHome } from "kin-prototype";
 
-const home = createReactiveHome()
+const home = createReactiveHome();
 
 const account = home.node({
   state: { balance: 100 },
   actions: {
-    deposit(ctx, amount: number) { ctx.state.balance += amount },
-    withdraw(ctx, amount: number) { ctx.state.balance -= amount },
+    deposit(ctx, amount: number) {
+      ctx.state.balance += amount;
+    },
+    withdraw(ctx, amount: number) {
+      ctx.state.balance -= amount;
+    },
   },
-})
+});
 
 const transaction = account.child({
   state: { amount: 0 },
   actions: {
-    setAmount(ctx, amount: number) { ctx.state.amount = amount },
+    setAmount(ctx, amount: number) {
+      ctx.state.amount = amount;
+    },
   },
-})
+});
 
 // Read state (readonly — throws on direct write)
-account.state.balance         // 100
-account.state.balance = 999   // TypeError
+account.state.balance; // 100
+account.state.balance = 999; // TypeError
 
 // Mutate via actions only
-account.actions.deposit(50)
-account.state.balance         // 150
+account.actions.deposit(50);
+account.state.balance; // 150
 
 // Subscribe — callback runs immediately, re-runs when deps change
 const sub = home.subscribe(() => {
-  console.log('balance:', account.state.balance)
-})
+  console.log("balance:", account.state.balance);
+});
 
 // Unsubscribe
-home.unsubscribe(sub)
+home.unsubscribe(sub);
 
 // Await flush (useful in tests)
-await home.flush()
+await home.flush();
 
 // Destroy (cascades to all descendants, cleans all subscriptions)
-account.destroy()
-home.destroy()
+account.destroy();
+home.destroy();
 ```
 
 ### Reactivity Properties
@@ -167,22 +174,115 @@ home.destroy()
 
 ---
 
+## Phase C — Cross-Node Authorization
+
+Implemented and stable. Built on top of Phase B.
+
+### How It Works
+
+Phase C introduces a cross-node authorization model that enables nodes to observe or invoke operations on other nodes when explicitly authorized.
+
+The core concepts are:
+
+```text
+Relationship
+      ↓
+    Grant
+      ↓
+  Capability
+      ↓
+Authorization
+      ↓
+Cross-node access
+```
+
+**Relationship**: Represents "who is connected to whom". A Relationship does NOT by itself grant access.
+
+**Grant**: Represents "what access is currently granted". A Grant is issued against a Relationship and is revocable.
+
+**Capability**: Describes the access a Grant confers (e.g., which fields can be read).
+
+**Authorization**: Evaluated when a cross-node subscription/access is established, not on every state mutation.
+
+### API
+
+```ts
+import { createReactiveHome, capability } from "kin-prototype";
+
+const home = createReactiveHome();
+
+const alice = home.node({
+  state: { balance: 100 },
+  actions: {
+    deposit(ctx, amount: number) {
+      ctx.state.balance += amount;
+    },
+  },
+});
+
+const bob = home.node({
+  state: { balance: 50 },
+  actions: {
+    deposit(ctx, amount: number) {
+      ctx.state.balance += amount;
+    },
+  },
+});
+
+// Create a Relationship between alice and bob
+const rel = home.relationship(alice, bob);
+
+// Issue a Grant over the Relationship
+const cap = capability(["balance"]); // alice can read bob's balance
+const grant = rel.grant(cap);
+
+// Create an authorized cross-node subscription
+home.subscribeAs(alice, bob, () => {
+  console.log("Bob balance:", bob.state.balance);
+});
+
+// Revoke the Grant (subscription is automatically disposed)
+grant.revoke();
+```
+
+### Key Design Rules
+
+- **Relationship ≠ Authorization**: A Relationship may exist without a Grant. A Grant may be revoked without destroying the Relationship.
+- **Authorization at subscription time**: Authorization is checked when a cross-node subscription is created, not on every state mutation.
+- **Revocation semantics**: When a Grant is revoked, all authorized subscriptions are disposed. Re-granting does NOT automatically restore old subscriptions.
+- **Owner authority distinct**: Owner authority is structurally distinct from normal Grant authority. There is no wildcard Capability.
+- **No tree traversal**: Cross-node authorization does not traverse the ownership tree. State updates remain O(subscribers for that field).
+
+### Security Boundaries
+
+- KinAuthError provides clear error codes for authorization failures.
+- Relationship destruction revokes all Grants and linked subscriptions.
+- Node destruction automatically destroys its Relationships and Grants.
+- No internal node identity fields are exposed through public APIs.
+
+---
+
 ## Project Structure
 
 ```
 kin-prototype/
 ├── src/
-│   ├── types.ts            # Type contracts (Phase A + Phase B)
+│   ├── types.ts            # Type contracts (Phase A + Phase B + Phase C)
 │   ├── node.ts             # createNode() — Phase A node factory
 │   ├── home.ts             # createHome() — Phase A non-reactive entry point
 │   ├── reactive.ts         # Reactive kernel (FieldSubscriberIndex, scheduler)
 │   ├── reactive-node.ts    # createReactiveNode() — Phase B reactive node factory
-│   ├── reactive-home.ts    # createReactiveHome() — Phase B entry point
+│   ├── reactive-home.ts    # createReactiveHome() — Phase B + Phase C entry point
+│   ├── relationship.ts     # Phase C Relationship, Grant, Capability
+│   ├── grant.ts            # Phase C GrantStore
+│   ├── authorization.ts    # Phase C authorization logic
 │   └── index.ts            # Public exports
 ├── test/
 │   ├── node.test.ts                # Phase A tests (31 tests)
 │   ├── reactive.test.ts            # Phase B tests (35 tests)
-│   └── reactive-hardening.test.ts  # Phase B hardening tests (26 tests)
+│   ├── reactive-hardening.test.ts  # Phase B hardening tests (26 tests)
+│   ├── phase-b-gate.test.ts        # Phase B gate tests (26 tests)
+│   └── phase-c.test.ts             # Phase C tests (30+ tests)
 ├── benchmark/
 │   └── bench.ts            # Phase B synthetic benchmark (S1–S6)
 ├── package.json
@@ -202,8 +302,8 @@ npm test
 Expected output:
 
 ```
-ℹ tests 92+
-ℹ pass  92+
+ℹ tests 150+
+ℹ pass  150+
 ℹ fail  0
 ```
 
@@ -223,11 +323,11 @@ node --import tsx/esm benchmark/bench.ts
 
 ## Completed Phases
 
-| Phase | Status | Description |
-|---|---|---|
-| A | ✅ Complete | Home, Node, Ownership, State, Actions, Lifecycle, Cascade Destroy |
-| B | ✅ Complete | Field-level reactivity, subscribers, batching, lifecycle cleanup |
-| C | 🔜 Next | Relationship + Grant + cross-tree authorization |
+| Phase | Status      | Description                                                       |
+| ----- | ----------- | ----------------------------------------------------------------- |
+| A     | ✅ Complete | Home, Node, Ownership, State, Actions, Lifecycle, Cascade Destroy |
+| B     | ✅ Complete | Field-level reactivity, subscribers, batching, lifecycle cleanup  |
+| C     | ✅ Complete | Relationship, Grant, Capability, Authorization, Cross-node access |
 
 ---
 
