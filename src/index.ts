@@ -1,10 +1,13 @@
 /**
- * Phase A — Public exports
+ * Public exports
  *
- * Only expose what callers need. Internal helpers (_removeChild, _owner, etc.)
- * are accessible via the InternalNode interface but are not re-exported under
- * friendly names to discourage direct use.
+ * Phase A  — createHome()
+ * Phase B  — createReactiveHome()
  */
+
+// ---------------------------------------------------------------------------
+// Phase A
+// ---------------------------------------------------------------------------
 
 export { createHome } from './home.js'
 
@@ -18,4 +21,18 @@ export type {
   ReadonlyState,
   StateRecord,
   LifecycleState,
+} from './types.js'
+
+// ---------------------------------------------------------------------------
+// Phase B
+// ---------------------------------------------------------------------------
+
+export { createReactiveHome } from './reactive-home.js'
+
+export type {
+  ReactiveHome,
+  ReactiveNode,
+  ReactiveNodeDefinition,
+  Subscriber,
+  ReactiveScope,
 } from './types.js'

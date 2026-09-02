@@ -155,3 +155,55 @@ export interface Home {
    */
   destroy(): void
 }
+
+// ===========================================================================
+// Phase B — Reactive type contracts
+// ===========================================================================
+
+import type { Subscriber } from './reactive.js'
+export type { ReactiveScope } from './reactive.js'
+import type {
+  ReactiveInternalNode,
+  ReactiveNodeDefinition,
+} from './reactive-node.js'
+
+export type { Subscriber }
+export type { ReactiveInternalNode as ReactiveNode, ReactiveNodeDefinition }
+
+// ---------------------------------------------------------------------------
+// ReactiveHome — same shape as Home but creates ReactiveNodes
+// ---------------------------------------------------------------------------
+
+export interface ReactiveHome {
+  /**
+   * Create a root-level reactive node.
+   */
+  node<S extends StateRecord, A extends ActionsMap<S>>(
+    def: ReactiveNodeDefinition<S, A>
+  ): ReactiveInternalNode<S, A>
+
+  /**
+   * Subscribe to a reactive node.
+   * The callback runs immediately (registering deps) then re-runs whenever
+   * a dependency field changes.
+   * Returns the Subscriber handle — pass to unsubscribe() to clean up.
+   */
+  subscribe(run: () => void): Subscriber
+
+  /**
+   * Dispose a subscriber created by subscribe().
+   */
+  unsubscribe(sub: Subscriber): void
+
+  /**
+   * Returns the promise for the current flush cycle.
+   * Resolves immediately if nothing is pending.
+   * Use in tests: await home.flush()
+   */
+  flush(): Promise<void>
+
+  /**
+   * Destroy Home and all root nodes (and their subscriptions).
+   */
+  destroy(): void
+}
