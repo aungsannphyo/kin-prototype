@@ -190,7 +190,7 @@ import type {
   ReactiveNode,
   ReactiveNodeDefinition,
 } from './reactive-node.js'
-import type { Relationship, AuthorizedView } from './relationship.js'
+import type { Relationship, AuthorizedView, Grant } from './relationship.js'
 
 export type { Subscriber }
 // Export the PUBLIC ReactiveNode type only.
@@ -248,25 +248,35 @@ export interface ReactiveHome {
   /**
    * Phase C — Create an authorized cross-node subscription.
    *
-   * Performs an authorization check (requires a Relationship and an active Grant
-   * from source → target) then builds an AuthorizedView of the target.
+   * The caller supplies the Grant explicitly. This makes authorization
+   * deterministic — when multiple Grants exist on the same Relationship,
+   * the subscription uses exactly the Grant the caller intends.
    *
-   * The callback receives only the AuthorizedView<S> — a capability-filtered,
-   * Phase-B-tracked state surface. It cannot reach the real ReactiveNode,
-   * its internals, or any field not listed in the Grant's Capability.
+   * Validation (performed once at call time, never on mutation):
+   *  - GRANT_REVOKED        if grant.isRevoked
+   *  - RELATIONSHIP_DESTROYED if grant.relationship.isDestroyed
+   *  - GRANT_MISMATCH       if grant.relationship.source !== source
+   *                         or grant.relationship.target !== target
    *
-   * Reading an allowed field:   works, registers Phase B dependency normally.
-   * Reading a denied field:     throws KinAuthError('FIELD_NOT_GRANTED').
-   * Writing through the view:   always throws TypeError.
+   * The callback receives AuthorizedView<S> — capability-filtered, Phase-B-
+   * tracked state. Reading an allowed field registers a normal Phase B dep.
+   * Reading a denied field throws KinAuthError('FIELD_NOT_GRANTED').
+   *
+   * Phase C Capability is TOP-LEVEL FIELD based. capability(['profile'])
+   * authorizes reading the 'profile' key. If 'profile' holds a nested object,
+   * the entire object is readable — sub-fields are NOT independently controlled.
    *
    * The subscription is automatically disposed when the Grant is revoked or
    * the Relationship is destroyed. Re-granting does NOT restore old subs.
    *
-   * @throws KinAuthError if no Relationship exists or no active Grant is found.
+   * @throws KinAuthError('GRANT_REVOKED') if the grant is revoked.
+   * @throws KinAuthError('RELATIONSHIP_DESTROYED') if the relationship is gone.
+   * @throws KinAuthError('GRANT_MISMATCH') if the grant belongs to a different pair.
    */
   subscribeAs<S extends StateRecord, A extends ActionsMap<S>>(
     source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
     target: ReactiveNode<S, A>,
+    grant: Grant,
     run: (view: AuthorizedView<S>) => void
   ): Subscriber
 

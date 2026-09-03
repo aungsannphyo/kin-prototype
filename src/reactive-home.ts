@@ -7,13 +7,13 @@
  * It owns:
  *  - A ReactiveScope (the reactive kernel)
  *  - A set of root ReactiveInternalNodes
- *  - A GrantStore (Phase C: manages Relationships and Grants)
+ *  - A GrantStore (Phase C: creates and tracks Relationships)
  *
  * Phase C subscribeAs() flow:
- *  1. authorize()           — throws if no Relationship or no active Grant
- *  2. createAuthorizedView() — wraps target.state behind a capability filter proxy
+ *  1. validateGrant()        — caller supplies Grant explicitly; throws on any mismatch
+ *  2. createAuthorizedView() — wraps target.state behind capability filter proxy
  *  3. scope.createSubscriber(() => run(view))  — normal Phase B subscriber
- *  4. linkSubscriberToGrant()  — revocation disposes the subscriber
+ *  4. linkSubscriberToGrant() — revocation disposes the subscriber
  *
  * The callback receives only the AuthorizedView, never the raw ReactiveNode.
  * State mutation path is completely unchanged:
@@ -32,9 +32,8 @@ import { createReactiveScope } from './reactive.js'
 import type { Subscriber } from './reactive.js'
 import { HOME_OWNER_TAG } from './types.js'
 import { createGrantStore } from './grant.js'
-import { authorize, createAuthorizedView, linkSubscriberToGrant } from './authorization.js'
-import { GRANT_INTERNAL, type GrantInternal, type Relationship, type AuthorizedView } from './relationship.js'
-
+import { validateGrant, createAuthorizedView, linkSubscriberToGrant } from './authorization.js'
+import { GRANT_INTERNAL, type GrantInternal, type Grant, type Relationship, type AuthorizedView } from './relationship.js'
 export function createReactiveHome(): ReactiveHome {
   const scope = createReactiveScope()
   const grantStore = createGrantStore()
@@ -89,25 +88,26 @@ export function createReactiveHome(): ReactiveHome {
     subscribeAs<S extends StateRecord, A extends ActionsMap<S>>(
       source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
       target: ReactiveNode<S, A>,
+      grant: Grant,
       run: (view: AuthorizedView<S>) => void
     ): Subscriber {
       if (_destroyed) {
         throw new Error('Cannot subscribe on a destroyed Home.')
       }
 
-      // Step 1: Authorization check — throws if no Relationship or no active Grant.
-      const grant = authorize(
+      // Step 1: Validate the explicitly supplied Grant.
+      // Throws GRANT_REVOKED, RELATIONSHIP_DESTROYED, or GRANT_MISMATCH on failure.
+      validateGrant(
         source,
         target as ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
-        grantStore
+        grant
       )
 
-      // Step 2: Build the capability-filtered view.
-      // readSnapshot is the defensive copy captured at Grant-creation time.
+      // Step 2: Build the capability-filtered view using the Grant's read snapshot.
       const readSnapshot = (grant as GrantInternal)[GRANT_INTERNAL].readSnapshot
       const view = createAuthorizedView<S>(target, readSnapshot)
 
-      // Step 3: Create the subscriber using the existing Phase B machinery.
+      // Step 3: Create the subscriber using existing Phase B machinery.
       // The callback receives only the AuthorizedView — never the raw target.
       const sub = scope.createSubscriber(() => run(view))
 
