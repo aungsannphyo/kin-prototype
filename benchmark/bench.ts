@@ -587,11 +587,153 @@ async function runC2(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario C3 — Phase D: nested path authorization overhead
+//
+// Purpose: verify that 1,000 authorized subscribers watching a nested path
+// all execute when the parent object is replaced — and that the cost is
+// proportional to subscriber count, not relationship count.
+//
+// Setup:
+//   1,000 source nodes, 1 target, 1,000 relationships
+//   Grant: capability(['profile.name'])
+//   Each subscriber reads view.state.profile.name
+//
+// Mutation: replace the target's profile object once.
+// Expected: exactly 1,001 executions (1,000 authorized + 1 direct unrelated).
+// ---------------------------------------------------------------------------
+
+async function runC3(): Promise<void> {
+  section('C3 — Phase D: 1,000 nested-path subscribers, 1 profile replacement')
+
+  const SOURCE_COUNT = 1_000
+  const TARGET_FIELD = 'profile'
+
+  const home = createReactiveHome()
+  let executions = 0
+
+  const target = home.node({
+    state: { profile: { name: 'Alice', email: 'alice@x.com' }, balance: 0 },
+    actions: {
+      setProfile(ctx, v: { name: string; email: string }) {
+        ctx.state.profile = v
+      },
+    },
+  })
+
+  const sources = Array.from({ length: SOURCE_COUNT }, () =>
+    home.node({ state: { x: 0 } })
+  )
+
+  for (const source of sources) {
+    const rel = home.relationship(source, target)
+    const grant = rel.grant(capability([`${TARGET_FIELD}.name`]))
+    home.subscribeAs(source, target, grant, (view) => {
+      const profile = view.state.profile as Record<string, unknown>
+      executions += 1 + (String(profile['name']).length * 0)
+    })
+  }
+
+  // One direct (non-authorized) subscriber that also reads profile — will re-run on replacement.
+  home.subscribe(() => {
+    executions += 1 + (String((target.state.profile as Record<string, unknown>)['name']).length * 0)
+  })
+
+  executions = 0
+
+  const t0 = performance.now()
+
+  // Replace the profile object once → all profile subscribers must re-run.
+  target.actions.setProfile({ name: 'Bob', email: 'bob@x.com' })
+  await home.flush()
+
+  const elapsed = performance.now() - t0
+
+  const expectedExecutions = SOURCE_COUNT + 1
+
+  row('Source nodes', SOURCE_COUNT)
+  row('Target nodes', 1)
+  row('Relationships', SOURCE_COUNT)
+  row('Grants (capability: profile.name)', SOURCE_COUNT)
+  row('Nested-path authorized subscribers', SOURCE_COUNT)
+  row('Direct profile subscriber (non-authorized)', 1)
+  row('Total subscribers', SOURCE_COUNT + 1)
+  row('Expected executions', expectedExecutions)
+  row('Actual executions', executions)
+  row('Correct?', executions === expectedExecutions ? '✓ YES' : `✗ NO (got ${executions})`)
+  row('Wall time (ms)', fmt(elapsed))
+  row('Note', 'Authorization work at read time, not at mutation time')
+
+  home.destroy()
+}
+
+// ---------------------------------------------------------------------------
+// Scenario C4 — Phase D: nested proxy allocation stability
+//
+// Purpose: verify that 10,000 profile replacements all run the subscriber and
+// that there is no obvious proxy/cache retention causing incorrect behavior.
+//
+// Setup:
+//   1 subscriber, capability(['profile.name', 'profile.email'])
+//   Subscriber reads both view.state.profile.name and view.state.profile.email
+//
+// Mutation: 10,000 profile replacements (one per flush cycle).
+// Expected: exactly 10,000 subscriber executions.
+// ---------------------------------------------------------------------------
+
+async function runC4(): Promise<void> {
+  section('C4 — Phase D: nested proxy allocation — 10,000 profile replacements')
+
+  const MUTATIONS = 10_000
+
+  const home = createReactiveHome()
+  let executions = 0
+
+  const source = home.node({ state: { x: 0 } })
+  const target = home.node({
+    state: { profile: { name: 'Alice', email: 'alice@x.com' } },
+    actions: {
+      setProfile(ctx, v: { name: string; email: string }) {
+        ctx.state.profile = v
+      },
+    },
+  })
+
+  const rel = home.relationship(source, target)
+  const grant = rel.grant(capability(['profile.name', 'profile.email']))
+
+  home.subscribeAs(source, target, grant, (view) => {
+    const profile = view.state.profile as Record<string, unknown>
+    // Read both authorized fields — exercises nested proxy on every run.
+    executions += 1 + (String(profile['name']).length * 0) + (String(profile['email']).length * 0)
+  })
+
+  executions = 0  // reset after initial run
+
+  const t0 = performance.now()
+
+  for (let i = 0; i < MUTATIONS; i++) {
+    target.actions.setProfile({ name: `User${i}`, email: `u${i}@x.com` })
+    await home.flush()
+  }
+
+  const elapsed = performance.now() - t0
+
+  row('Mutations (profile replacements)', MUTATIONS)
+  row('Expected subscriber executions', MUTATIONS)
+  row('Actual subscriber executions', executions)
+  row('Correct?', executions === MUTATIONS ? '✓ YES' : `✗ NO (got ${executions})`)
+  row('Wall time (ms)', fmt(elapsed))
+  row('Note', 'Verifies no proxy/cache retention causes missed or duplicate runs')
+
+  home.destroy()
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 console.log('\n╔══════════════════════════════════════════════════════════╗')
-console.log('║   KIN Phase B + Phase C — Synthetic Benchmark           ║')
+console.log('║   KIN Phase B + Phase C + Phase D — Synthetic Benchmark  ║')
 console.log('╚══════════════════════════════════════════════════════════╝')
 console.log('\nGoal: validate architectural claim that state updates do')
 console.log('NOT traverse unrelated nodes, and that authorization cost')
@@ -605,6 +747,8 @@ await runS5()
 await runS6()
 await runC1()
 await runC2()
+await runC3()
+await runC4()
 
 console.log(`\n${'═'.repeat(60)}`)
 console.log('  Benchmark complete.')

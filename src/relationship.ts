@@ -81,16 +81,86 @@ export interface Capability {
   readonly read: ReadonlySet<string>
 }
 
-/** Construct a Capability from an array of readable field names.
+/** Construct a Capability from an array of readable field names or dot-separated paths.
  *
- * The returned Capability captures a snapshot of `fields` at call time.
- * Mutating the original array afterwards does NOT affect the Capability.
- * The internal Set is intentionally not re-exported so consumers cannot
- * call .add() on it at runtime — they must go through this factory.
+ * Phase C: top-level field names only, e.g. `['balance', 'name']`.
+ * Phase D: dot-separated nested paths also supported, e.g. `['profile.name', 'profile.email']`.
+ *
+ * Path grammar:
+ *   segment := [a-zA-Z_$][a-zA-Z0-9_$]*   (no numeric, no prototype-chain names)
+ *   path    := segment ('.' segment)*
+ *
+ * Rejected:
+ *   - empty string
+ *   - numeric-only segment (e.g. '0', '1')
+ *   - prototype-dangerous names (__proto__, constructor, prototype, hasOwnProperty, __anything__)
+ *   - invalid identifier syntax (spaces, hyphens, leading/trailing dots, double dots)
+ *
+ * Duplicate paths are silently deduplicated (Set semantics).
+ * Mutating the original array after `capability()` does NOT affect the result.
+ *
+ * @throws TypeError for any path that fails validation.
  */
 export function capability(fields: string[]): Capability {
+  for (const path of fields) {
+    _validateCapabilityPath(path)
+  }
   // Defensive copy: snapshot at call time, independent of the input array.
   return { read: new Set(fields) }
+}
+
+// ---------------------------------------------------------------------------
+// _validateCapabilityPath — module-private path validator
+// ---------------------------------------------------------------------------
+
+/** Blocked segment names. These are prototype-chain / host-object attack vectors. */
+const _BLOCKED_SEGMENTS = new Set([
+  '__proto__', 'constructor', 'prototype', 'hasOwnProperty',
+  'toString', 'valueOf', 'isPrototypeOf', 'propertyIsEnumerable',
+  'toLocaleString',
+])
+
+/**
+ * Validate a single capability path string.
+ * Throws TypeError with a descriptive message on any failure.
+ */
+function _validateCapabilityPath(path: string): void {
+  if (path.length === 0) {
+    throw new TypeError(
+      'capability(): path must not be empty.'
+    )
+  }
+  if (path.startsWith('.') || path.endsWith('.') || path.includes('..')) {
+    throw new TypeError(
+      `capability(): invalid path "${path}" — paths must not start/end with "." or contain "..".`
+    )
+  }
+
+  const segments = path.split('.')
+
+  for (const segment of segments) {
+    // Must be a valid JS identifier start.
+    if (!/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(segment)) {
+      throw new TypeError(
+        `capability(): invalid path segment "${segment}" in "${path}" — ` +
+        `segments must match [a-zA-Z_$][a-zA-Z0-9_$]* (no numeric, no spaces, no hyphens).`
+      )
+    }
+    // Double-underscore prefix is forbidden (e.g. __proto__, __anything__).
+    if (segment.startsWith('__')) {
+      throw new TypeError(
+        `capability(): forbidden segment "${segment}" in "${path}" — ` +
+        `segments starting with "__" are not allowed.`
+      )
+    }
+    // Blocked names list.
+    if (_BLOCKED_SEGMENTS.has(segment)) {
+      throw new TypeError(
+        `capability(): forbidden segment "${segment}" in "${path}" — ` +
+        `prototype-chain names are not allowed.`
+      )
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

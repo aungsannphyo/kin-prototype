@@ -949,3 +949,519 @@ describe('Security — Phase B direct access is unrestricted (by design)', () =>
     home.destroy()
   })
 })
+
+// ===========================================================================
+// PHASE D — Deep/Nested Capability Authorization
+//
+// All Phase C tests above remain unchanged.
+// Phase D tests are appended below.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// J. Capability path validation
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Capability validation: valid paths accepted', () => {
+  it('top-level field is accepted', () => {
+    assert.doesNotThrow(() => capability(['balance']))
+  })
+
+  it('single nested path is accepted', () => {
+    assert.doesNotThrow(() => capability(['profile.name']))
+  })
+
+  it('multi-level nested path is accepted', () => {
+    assert.doesNotThrow(() => capability(['a.b.c']))
+  })
+
+  it('dollar-sign and underscore identifiers are valid', () => {
+    assert.doesNotThrow(() => capability(['$field', '_private', 'a$b_c']))
+  })
+
+  it('multiple valid paths accepted together', () => {
+    assert.doesNotThrow(() => capability(['balance', 'profile.name', 'profile.email']))
+  })
+
+  it('duplicate paths are silently deduplicated', () => {
+    const cap = capability(['balance', 'balance', 'profile.name', 'profile.name'])
+    assert.equal(cap.read.size, 2)
+    assert.ok(cap.read.has('balance'))
+    assert.ok(cap.read.has('profile.name'))
+  })
+
+  it('mutation of original array after capability() does not affect result', () => {
+    const fields = ['balance']
+    const cap = capability(fields)
+    fields.push('secret')
+    assert.equal(cap.read.has('secret'), false)
+    assert.equal(cap.read.has('balance'), true)
+  })
+})
+
+describe('Phase D — Capability validation: invalid paths rejected', () => {
+  it('empty string is rejected', () => {
+    assert.throws(() => capability(['']), TypeError)
+  })
+
+  it('numeric-only top-level key is rejected', () => {
+    assert.throws(() => capability(['0']), TypeError)
+    assert.throws(() => capability(['1']), TypeError)
+    assert.throws(() => capability(['42']), TypeError)
+  })
+
+  it('numeric segment in nested path is rejected', () => {
+    assert.throws(() => capability(['items.0']), TypeError)
+    assert.throws(() => capability(['a.1.b']), TypeError)
+  })
+
+  it('leading dot is rejected', () => {
+    assert.throws(() => capability(['.profile']), TypeError)
+  })
+
+  it('trailing dot is rejected', () => {
+    assert.throws(() => capability(['profile.']), TypeError)
+  })
+
+  it('double dot is rejected', () => {
+    assert.throws(() => capability(['profile..name']), TypeError)
+  })
+
+  it('hyphen in segment is rejected', () => {
+    assert.throws(() => capability(['profile-name']), TypeError)
+    assert.throws(() => capability(['a.b-c']), TypeError)
+  })
+
+  it('space in segment is rejected', () => {
+    assert.throws(() => capability(['profile name']), TypeError)
+  })
+
+  it('__proto__ is rejected', () => {
+    assert.throws(() => capability(['__proto__']), TypeError)
+    assert.throws(() => capability(['profile.__proto__']), TypeError)
+  })
+
+  it('constructor is rejected', () => {
+    assert.throws(() => capability(['constructor']), TypeError)
+    assert.throws(() => capability(['a.constructor']), TypeError)
+  })
+
+  it('prototype is rejected', () => {
+    assert.throws(() => capability(['prototype']), TypeError)
+  })
+
+  it('hasOwnProperty is rejected', () => {
+    assert.throws(() => capability(['hasOwnProperty']), TypeError)
+  })
+
+  it('double-underscore prefix is rejected', () => {
+    assert.throws(() => capability(['__anything']), TypeError)
+    assert.throws(() => capability(['a.__anything']), TypeError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// K. Nested authorization — allowed fields
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Nested authorization: allowed field access', () => {
+  it('capability(["profile.name"]) allows view.state.profile.name', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Alice', email: 'alice@x.com', password: 'secret' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    let seen: string | null = null
+    home.subscribeAs(a, b, g, (view) => {
+      seen = (view.state.profile as Record<string, unknown>)['name'] as string
+    })
+    assert.equal(seen, 'Alice')
+    home.destroy()
+  })
+
+  it('capability(["profile.name","profile.email"]) allows both, denies password', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Bob', email: 'bob@x.com', password: 'secret' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name', 'profile.email']))
+
+    let seenName: string | null = null
+    let seenEmail: string | null = null
+    home.subscribeAs(a, b, g, (view) => {
+      const p = view.state.profile as Record<string, unknown>
+      seenName  = p['name']  as string
+      seenEmail = p['email'] as string
+    })
+    assert.equal(seenName,  'Bob')
+    assert.equal(seenEmail, 'bob@x.com')
+
+    // password must be denied
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        void (view.state.profile as Record<string, unknown>)['password']
+      }),
+      (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+    )
+    home.destroy()
+  })
+
+  it('capability(["profile"]) (subtree grant) exposes all nested fields — Phase C backward compat', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Carol', password: 'secret' } } })
+    const g = home.relationship(a, b).grant(capability(['profile']))
+
+    let seenName: string | null = null
+    let seenPwd: string | null = null
+    home.subscribeAs(a, b, g, (view) => {
+      const p = view.state.profile as Record<string, unknown>
+      seenName = p['name'] as string
+      seenPwd  = p['password'] as string
+    })
+    assert.equal(seenName, 'Carol')
+    assert.equal(seenPwd,  'secret')  // subtree grant: entire object accessible
+    home.destroy()
+  })
+
+  it('three-level deep: capability(["a.b.c"]) allows a.b.c', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { a: { b: { c: 42, d: 99 } } } })
+    const g = home.relationship(a, b).grant(capability(['a.b.c']))
+
+    let seen: number | null = null
+    home.subscribeAs(a, b, g, (view) => {
+      const lvlA = view.state.a as Record<string, unknown>
+      const lvlB = lvlA['b'] as Record<string, unknown>
+      seen = lvlB['c'] as number
+    })
+    assert.equal(seen, 42)
+    home.destroy()
+  })
+
+  it('top-level field alongside nested path: both work independently', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { balance: 100, profile: { name: 'Dan', ssn: '000' } } })
+    const g = home.relationship(a, b).grant(capability(['balance', 'profile.name']))
+
+    let seenBalance: number | null = null
+    let seenName: string | null = null
+    home.subscribeAs(a, b, g, (view) => {
+      seenBalance = view.state.balance as number
+      seenName = (view.state.profile as Record<string, unknown>)['name'] as string
+    })
+    assert.equal(seenBalance, 100)
+    assert.equal(seenName, 'Dan')
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// L. Nested authorization — denied fields
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Nested authorization: denied field access throws', () => {
+  it('profile.password is denied when only profile.name is granted', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Eve', password: 'secret' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        void (view.state.profile as Record<string, unknown>)['password']
+      }),
+      (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+    )
+    home.destroy()
+  })
+
+  it('three-level: a.b.d is denied when only a.b.c is granted', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { a: { b: { c: 1, d: 2 } } } })
+    const g = home.relationship(a, b).grant(capability(['a.b.c']))
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        const lvlA = view.state.a as Record<string, unknown>
+        const lvlB = lvlA['b'] as Record<string, unknown>
+        void lvlB['d']
+      }),
+      (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+    )
+    home.destroy()
+  })
+
+  it('top-level field not in capability is still denied alongside nested paths', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { balance: 0, secret: 99 } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        void (view.state as unknown as Record<string, unknown>)['balance']
+      }),
+      (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+    )
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M. Filtered nested proxy — view.state.profile is NOT the raw object
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Nested proxy: filtered view is not the raw object', () => {
+  it('view.state.profile is a proxy, not the raw profile object, when only descendants are granted', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const rawProfile = { name: 'Frank', password: 'secret' }
+    const b = home.node({ state: { profile: rawProfile } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    let capturedProfile: unknown = null
+    home.subscribeAs(a, b, g, (view) => {
+      capturedProfile = view.state.profile
+    })
+
+    // The proxy must NOT be the raw profile object.
+    assert.notEqual(capturedProfile, rawProfile)
+    home.destroy()
+  })
+
+  it('the filtered profile proxy allows only authorized fields', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Grace', email: 'g@x.com', password: 'secret' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name', 'profile.email']))
+
+    home.subscribeAs(a, b, g, (view) => {
+      const p = view.state.profile as Record<string, unknown>
+      // Allowed
+      assert.equal(p['name'],  'Grace')
+      assert.equal(p['email'], 'g@x.com')
+      // Denied
+      assert.throws(
+        () => void p['password'],
+        (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+      )
+    })
+    home.destroy()
+  })
+
+  it('proxy caching: accessing the same nested key twice returns the same proxy object', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Heidi' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    let ref1: unknown = null
+    let ref2: unknown = null
+    home.subscribeAs(a, b, g, (view) => {
+      ref1 = view.state.profile
+      ref2 = view.state.profile
+    })
+    assert.strictEqual(ref1, ref2, 'same proxy object must be returned for repeated access within one run')
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// N. Nested proxy security
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Nested proxy security', () => {
+  it('nested proxy write throws TypeError', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Ivan' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        (view.state.profile as Record<string, unknown>)['name'] = 'hacked'
+      }),
+      TypeError
+    )
+    assert.equal((b.state.profile as Record<string, unknown>)['name'], 'Ivan')
+    home.destroy()
+  })
+
+  it('nested proxy delete throws TypeError', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Judy' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        delete (view.state.profile as Record<string, unknown>)['name']
+      }),
+      TypeError
+    )
+    home.destroy()
+  })
+
+  it('__proto__ is not accessible through a nested proxy', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Karl' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    home.subscribeAs(a, b, g, (view) => {
+      const p = view.state.profile as Record<string, unknown>
+      assert.equal(p['__proto__'], undefined)
+      assert.equal(p['constructor'], undefined)
+      assert.equal(p['prototype'], undefined)
+    })
+    home.destroy()
+  })
+
+  it('nested proxy does not expose internal Symbols', async () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Leo' } } })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    const { REACTIVE_NODE_INTERNAL: sym } = await import('../src/reactive-node.js') as typeof import('../src/reactive-node.js')
+    home.subscribeAs(a, b, g, (view) => {
+      const p = view.state.profile as unknown as Record<symbol, unknown>
+      assert.equal(p[sym], undefined)
+    })
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// O. Reactive integration with nested paths
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Reactive integration: nested paths track top-level key', () => {
+  it('reading profile.name registers dep on top-level profile key', async () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({
+      state: { profile: { name: 'Mia', email: 'mia@x.com' } },
+      actions: {
+        setProfile(ctx, v: { name: string; email: string }) {
+          ctx.state.profile = v
+        },
+      },
+    })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    const seen: string[] = []
+    home.subscribeAs(a, b, g, (view) => {
+      seen.push((view.state.profile as Record<string, unknown>)['name'] as string)
+    })
+    assert.deepEqual(seen, ['Mia'])
+
+    // Replace profile object → subscriber re-runs (top-level key changed)
+    b.actions.setProfile({ name: 'Nia', email: 'nia@x.com' })
+    await home.flush()
+    assert.deepEqual(seen, ['Mia', 'Nia'])
+
+    home.destroy()
+  })
+
+  it('unrelated top-level mutation does not trigger subscriber', async () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({
+      state: { profile: { name: 'Oscar' }, balance: 0 },
+      actions: { setBalance(ctx, v: number) { ctx.state.balance = v } },
+    })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    let runs = 0
+    home.subscribeAs(a, b, g, (view) => {
+      runs++
+      void (view.state.profile as Record<string, unknown>)['name']
+    })
+    runs = 0
+
+    b.actions.setBalance(99)
+    await home.flush()
+    assert.equal(runs, 0, 'unrelated key change must not trigger subscriber')
+    home.destroy()
+  })
+
+  it('in-place nested mutation does not trigger subscriber (Phase D documented limitation)', async () => {
+    // Phase D reactive tracking is top-level only.
+    // Mutating profile.name without replacing the profile reference does NOT re-run the subscriber.
+    // This is documented behavior; deep reactivity tracking is a Phase E concern.
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const profileObj = { name: 'Pat', email: 'pat@x.com' }
+    const b = home.node({
+      state: { profile: profileObj },
+      actions: {
+        mutateName(ctx) {
+          // In-place mutation — does not change the profile reference
+          ;(ctx.state.profile as Record<string, unknown>)['name'] = 'Quinn'
+        },
+      },
+    })
+    const g = home.relationship(a, b).grant(capability(['profile.name']))
+
+    let runs = 0
+    home.subscribeAs(a, b, g, (view) => {
+      runs++
+      void (view.state.profile as Record<string, unknown>)['name']
+    })
+    runs = 0
+
+    b.actions.mutateName()
+    await home.flush()
+    // In-place nested mutation: subscriber does NOT re-run (same object reference)
+    assert.equal(runs, 0, 'in-place nested mutation must not trigger subscriber — Phase D documented limitation')
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P. Capability immutability with nested paths
+// ---------------------------------------------------------------------------
+
+describe('Phase D — Capability immutability with nested paths', () => {
+  it('pushing to original array after capability() does not expand nested grant', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Rex', password: 'secret' } } })
+
+    const fields = ['profile.name']
+    const cap = capability(fields)
+    const g = home.relationship(a, b).grant(cap)
+    fields.push('profile.password') // mutate after grant creation
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        void (view.state.profile as Record<string, unknown>)['password']
+      }),
+      (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+    )
+    home.destroy()
+  })
+
+  it('Grant readSnapshot is independent of Capability mutation after issuance', () => {
+    const home = createReactiveHome()
+    const a = home.node({ state: { x: 0 } })
+    const b = home.node({ state: { profile: { name: 'Sam', password: 'secret' } } })
+
+    const cap = capability(['profile.name'])
+    const g = home.relationship(a, b).grant(cap)
+
+    // Attempt runtime Set mutation after grant creation
+    try { (cap.read as unknown as Set<string>).add('profile.password') } catch { /* ok */ }
+
+    assert.throws(
+      () => home.subscribeAs(a, b, g, (view) => {
+        void (view.state.profile as Record<string, unknown>)['password']
+      }),
+      (err: unknown) => err instanceof KinAuthError && err.code === 'FIELD_NOT_GRANTED'
+    )
+    home.destroy()
+  })
+})

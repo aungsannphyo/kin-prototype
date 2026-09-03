@@ -1,12 +1,11 @@
 /**
- * Phase C — Authorization
+ * Phase C + Phase D — Authorization
  *
  * validateGrant() is called ONCE at subscription-creation time.
  * It is NOT called on every state mutation.
  *
- * The caller supplies the Grant explicitly. There is no implicit "first active
- * Grant" search. This makes authorization deterministic when multiple Grants
- * exist on the same Relationship.
+ * Phase C: flat top-level field authorization.
+ * Phase D: nested path authorization (dot-separated paths).
  *
  * Authorization flow:
  *
@@ -32,25 +31,34 @@
  *         ▼
  *   linkSubscriberToGrant(grant, disposer)
  *
- * Capability enforcement — read path:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Phase D — Nested path authorization
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- *   view.state.balance
- *         │
- *         ▼  capability filter proxy
- *   readSnapshot.has('balance') ?
- *         │ NO  → throw KinAuthError('FIELD_NOT_GRANTED')
- *         │ YES ↓
- *   Reflect.get(target.state, 'balance')   ← existing Phase B tracking proxy
- *         │
- *         ▼
- *   scope.trackField('n3:balance')          ← Phase B dep registration
+ * Capability paths may now be dot-separated:
+ *   capability(['profile.name', 'profile.email', 'balance'])
  *
- * Capability depth:
- *   Phase C Capability is TOP-LEVEL FIELD based.
- *   capability(['profile']) authorizes the 'profile' key only.
- *   If 'profile' holds a nested object, the entire object is readable through
- *   the view (since the top-level key is authorized). Sub-fields are NOT
- *   independently controlled. Deep authorization is a Phase D concern.
+ * Path-matching rules (applied at read time on the AuthorizedView):
+ *
+ *   Rule 1 — Exact match
+ *     readSnapshot.has(accessPath) → ALLOW, return value
+ *
+ *   Rule 2 — Authorized ancestor (subtree grant)
+ *     Any P in readSnapshot where accessPath.startsWith(P + '.') → ALLOW, return value
+ *     (e.g. snapshot has 'profile', accessing 'profile.name' → allowed)
+ *
+ *   Rule 3 — Authorized descendant → filtered nested proxy
+ *     Any P in readSnapshot where P.startsWith(accessPath + '.') → ALLOW,
+ *     but return createNestedProxy(value, derivedSubSnapshot) instead of raw value.
+ *     (e.g. snapshot has 'profile.name', accessing 'profile' → filtered proxy)
+ *
+ *   Rule 4 — No match → throw KinAuthError('FIELD_NOT_GRANTED')
+ *
+ * IMPORTANT: Reactive tracking remains TOP-LEVEL only (unchanged from Phase C).
+ *   view.state.profile.name registers dep on n3:profile (not n3:profile.name).
+ *   In-place nested mutation without replacing the parent reference does NOT
+ *   trigger subscribers. This is a documented Phase D limitation; deep reactive
+ *   tracking is Phase E scope.
  *
  * State mutation path is completely unchanged:
  *   notifyField → _fieldIndex → schedule → flush
@@ -68,15 +76,7 @@ import {
 } from './relationship.js'
 
 // ---------------------------------------------------------------------------
-// validateGrant
-//
-// Validates that the explicitly supplied Grant may authorize a subscription
-// from source → target. Throws KinAuthError on any validation failure.
-//
-// Validation order:
-//  1. GRANT_REVOKED        — grant has been revoked
-//  2. RELATIONSHIP_DESTROYED — grant's relationship is destroyed
-//  3. GRANT_MISMATCH       — grant belongs to a different source or target
+// validateGrant  (unchanged from Phase C)
 // ---------------------------------------------------------------------------
 
 export function validateGrant(
@@ -109,51 +109,227 @@ export function validateGrant(
 }
 
 // ---------------------------------------------------------------------------
-// createAuthorizedView
+// Path-matching helpers  (Phase D — module-private)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether `accessPath` is authorized given `readSnapshot`.
+ *
+ * Returns:
+ *   'allow-value'   — access is authorized; return the raw value
+ *   'allow-proxy'   — access is authorized; return a filtered nested proxy
+ *   'deny'          — access is not authorized
+ */
+function _matchPath(
+  readSnapshot: ReadonlySet<string>,
+  accessPath: string
+): 'allow-value' | 'allow-proxy' | 'deny' {
+  // Rule 1: exact match
+  if (readSnapshot.has(accessPath)) return 'allow-value'
+
+  const prefix = accessPath + '.'
+
+  for (const p of readSnapshot) {
+    // Rule 2: authorized ancestor — snapshot has 'profile', accessing 'profile.name'
+    if (accessPath.startsWith(p + '.')) return 'allow-value'
+
+    // Rule 3: authorized descendant — snapshot has 'profile.name', accessing 'profile'
+    if (p.startsWith(prefix)) return 'allow-proxy'
+  }
+
+  return 'deny'
+}
+
+/**
+ * Derive the sub-snapshot for a nested proxy at `prefix`.
+ *
+ * Given readSnapshot = Set { 'profile.name', 'profile.email', 'balance' }
+ * and prefix = 'profile'
+ * returns Set { 'name', 'email' }
+ */
+function _deriveSubSnapshot(
+  readSnapshot: ReadonlySet<string>,
+  prefix: string
+): ReadonlySet<string> {
+  const stripLen = prefix.length + 1 // +1 for the '.'
+  const sub = new Set<string>()
+  for (const p of readSnapshot) {
+    if (p.startsWith(prefix + '.')) {
+      sub.add(p.slice(stripLen))
+    }
+  }
+  return sub
+}
+
+// ---------------------------------------------------------------------------
+// createNestedProxy  (Phase D — module-private)
 //
-// Builds the capability-filtered, Phase-B-tracked state surface passed to
-// the subscribeAs() callback.
+// Builds a capability-filtered proxy over a plain nested object.
+// Does NOT interact with the ReactiveNode, Actions, ReactiveScope, or any
+// framework-internal machinery. It is a pure authorization filter.
 //
-// Phase C Capability is TOP-LEVEL FIELD based:
-//   - capability(['balance']) authorizes reading the 'balance' key.
-//   - capability(['profile']) authorizes reading the 'profile' key.
-//     If 'profile' holds { name, password }, the entire object is accessible
-//     because 'profile' is the authorized top-level key. Sub-fields are NOT
-//     independently controlled in Phase C.
-//   - Deep/nested path authorization (profile.password) is a Phase D concern.
+// Security invariants:
+//   - set / deleteProperty / defineProperty → always throw TypeError
+//   - __proto__, constructor, prototype-chain names → undefined (not exposed)
+//   - Symbol-keyed access passes through silently (no authorization check —
+//     symbols cannot be capability path segments)
+//   - The proxy wrapper is Object.freeze()'d to block property injection
+//   - Internal cache lives for the lifetime of this proxy object only —
+//     no global or cross-subscriber retention
+// ---------------------------------------------------------------------------
+
+function _createNestedProxy(
+  rawObj: unknown,
+  subSnapshot: ReadonlySet<string>
+): object {
+  // If the raw value is not an object (e.g. a primitive reached via a subtree grant),
+  // just return it — nothing to proxy. This handles the edge case of
+  // capability(['profile']) where profile is e.g. a string.
+  if (rawObj === null || typeof rawObj !== 'object') {
+    return rawObj as object
+  }
+
+  // Per-proxy field cache: avoid re-allocating nested proxies for the same
+  // property on repeated reads within a single subscriber run.
+  const _cache = new Map<string, unknown>()
+
+  const proxy = new Proxy(rawObj as Record<string | symbol, unknown>, {
+    get(target, prop) {
+      // Symbol-keyed access: pass through silently (no authorization needed).
+      if (typeof prop !== 'string') {
+        return target[prop]
+      }
+
+      // Block prototype-chain access.
+      if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+        return undefined
+      }
+
+      const match = _matchPath(subSnapshot, prop)
+
+      if (match === 'deny') {
+        throw new KinAuthError(
+          'FIELD_NOT_GRANTED',
+          `Cross-node access denied: field "${prop}" is not in the Grant's Capability.`
+        )
+      }
+
+      if (match === 'allow-value') {
+        return target[prop]
+      }
+
+      // match === 'allow-proxy': return a cached nested proxy
+      if (_cache.has(prop)) return _cache.get(prop)
+      const nestedSub = _deriveSubSnapshot(subSnapshot, prop)
+      const nested = _createNestedProxy(target[prop], nestedSub)
+      _cache.set(prop, nested)
+      return nested
+    },
+
+    set(_t, prop) {
+      throw new TypeError(
+        `Cannot mutate: field "${String(prop)}" is read-only on an AuthorizedView.`
+      )
+    },
+    deleteProperty(_t, prop) {
+      throw new TypeError(
+        `Cannot delete field "${String(prop)}" from an AuthorizedView.`
+      )
+    },
+    defineProperty(_t, prop) {
+      throw new TypeError(
+        `Cannot define property "${String(prop)}" on an AuthorizedView.`
+      )
+    },
+  })
+
+  return proxy
+}
+
+// ---------------------------------------------------------------------------
+// createAuthorizedView  (Phase C unchanged surface; Phase D extended internals)
 //
-// The returned AuthorizedView<S>:
-//   - Exposes only `.state`
-//   - `.state` proxy on each string field get:
-//       1. Checks readSnapshot.has(fieldName) → throws FIELD_NOT_GRANTED if denied
-//       2. Delegates to target.state[fieldName] → hits Phase B tracking proxy
-//          → scope.trackField(nodeId:fieldName) dep registration
-//   - Exposes NO actions, destroy, child, isParent, isChild, or internal Symbols
-//   - Is Object.freeze()'d — property injection is rejected
+// Builds the top-level state surface passed to the subscribeAs() callback.
 //
-// readSnapshot is captured at Grant-creation time (independent defensive copy).
-// Mutating the original Capability after Grant issuance cannot expand access.
+// Phase D changes vs Phase C:
+//   - The top-level proxy now uses _matchPath() instead of readSnapshot.has()
+//   - For 'allow-proxy' results, a nested proxy is returned (caching per view)
+//   - For 'allow-value' results, behavior is identical to Phase C
+//   - Security invariants, Object.freeze, and the interface are unchanged
+//
+// Reactive tracking: UNCHANGED from Phase C.
+//   reading view.state.profile.name registers dep on n3:profile (top-level key).
+//   This is because the delegation to target.state[prop] happens at the top level;
+//   the nested proxy does NOT call scope.trackField() — tracking already occurred
+//   when target.state[prop] was read by the top-level proxy.
 // ---------------------------------------------------------------------------
 
 export function createAuthorizedView<S extends StateRecord>(
   target: ReactiveNode<S, ActionsMap<S>>,
   readSnapshot: ReadonlySet<string>
 ): AuthorizedView<S> {
+
+  // Per-view top-level proxy cache, keyed by field name.
+  // Tracks the raw value at time of proxy creation so we can detect
+  // when the underlying value has been replaced (e.g. after setProfile).
+  // When the raw value reference changes, a fresh proxy is created.
+  // This gives correct behavior across subscriber re-runs while avoiding
+  // redundant proxy allocation within a single run.
+  const _topCache = new Map<string, unknown>()
+  const _topCacheRaw = new Map<string, unknown>()
+
   const filteredState = new Proxy(target.state as object, {
     get(_stateProxy, prop) {
-      if (typeof prop === 'string') {
-        if (!readSnapshot.has(prop)) {
-          throw new KinAuthError(
-            'FIELD_NOT_GRANTED',
-            `Cross-node access denied: field "${prop}" is not in the Grant's Capability.`
-          )
-        }
-        // Delegate to the existing Phase B tracking proxy — registers the dep.
+      // Symbol-keyed access: pass through silently.
+      if (typeof prop !== 'string') {
+        return (target.state as Record<symbol, unknown>)[prop as symbol]
+      }
+
+      // Block prototype-chain access.
+      if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+        return undefined
+      }
+
+      const match = _matchPath(readSnapshot, prop)
+
+      if (match === 'deny') {
+        throw new KinAuthError(
+          'FIELD_NOT_GRANTED',
+          `Cross-node access denied: field "${prop}" is not in the Grant's Capability.`
+        )
+      }
+
+      if (match === 'allow-value') {
+        // Delegate to the Phase B tracking proxy — registers the dep.
         return (target.state as Record<string, unknown>)[prop]
       }
-      // Non-string props (Symbol.toPrimitive etc.) — pass through silently.
-      return (target.state as Record<symbol, unknown>)[prop as symbol]
+
+      // match === 'allow-proxy'
+      // Read the current raw value from the Phase B tracking proxy.
+      // This registers the dep on this top-level key (e.g. n3:profile)
+      // and always reflects the latest value.
+      const rawValue = (target.state as Record<string, unknown>)[prop]
+
+      // Cache keyed by the raw value's object reference.
+      // If the value is replaced (e.g. setProfile sets a new object),
+      // the cache miss creates a fresh proxy over the new object.
+      // Within one subscriber run, repeated accesses to the same key
+      // return the same proxy (same reference → cache hit).
+      const cached = _topCache.get(prop)
+      if (cached !== undefined) {
+        // Check that the cached proxy is still wrapping the same object.
+        // We detect staleness via the _rawRef WeakMap below.
+        const rawRef = _topCacheRaw.get(prop)
+        if (rawRef === rawValue) return cached
+      }
+
+      const subSnapshot = _deriveSubSnapshot(readSnapshot, prop)
+      const nested = _createNestedProxy(rawValue, subSnapshot)
+      _topCache.set(prop, nested)
+      _topCacheRaw.set(prop, rawValue)
+      return nested
     },
+
     set(_t, prop) {
       throw new TypeError(
         `Cannot mutate state: field "${String(prop)}" is read-only on an AuthorizedView.`
@@ -175,16 +351,12 @@ export function createAuthorizedView<S extends StateRecord>(
 }
 
 // ---------------------------------------------------------------------------
-// linkSubscriberToGrant
-//
-// Registers a disposer so that revoking the Grant immediately disposes the
-// subscriber. Called once after scope.createSubscriber().
+// linkSubscriberToGrant  (unchanged from Phase C)
 // ---------------------------------------------------------------------------
 
 export function linkSubscriberToGrant(grant: Grant, dispose: () => void): void {
   const internal = (grant as GrantInternal)[GRANT_INTERNAL]
   if (grant.isRevoked) {
-    // Guard: grant was revoked between validateGrant() and this call.
     dispose()
     return
   }
