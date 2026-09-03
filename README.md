@@ -237,8 +237,13 @@ const cap = capability(["balance"]); // alice can read bob's balance
 const grant = rel.grant(cap);
 
 // Create an authorized cross-node subscription
-home.subscribeAs(alice, bob, () => {
-  console.log("Bob balance:", bob.state.balance);
+// The grant must be supplied explicitly — authorization is deterministic
+home.subscribeAs(alice, bob, grant, (view) => {
+  // view is an AuthorizedView<S> — only 'balance' is readable
+  console.log("Bob balance:", view.state.balance);
+  // view.state.other  → throws KinAuthError('FIELD_NOT_GRANTED')
+  // view.actions      → undefined (no actions through view)
+  // view.destroy      → undefined (no lifecycle ops through view)
 });
 
 // Revoke the Grant (subscription is automatically disposed)
@@ -247,18 +252,26 @@ grant.revoke();
 
 ### Key Design Rules
 
-- **Relationship ≠ Authorization**: A Relationship may exist without a Grant. A Grant may be revoked without destroying the Relationship.
-- **Authorization at subscription time**: Authorization is checked when a cross-node subscription is created, not on every state mutation.
-- **Revocation semantics**: When a Grant is revoked, all authorized subscriptions are disposed. Re-granting does NOT automatically restore old subscriptions.
-- **Owner authority distinct**: Owner authority is structurally distinct from normal Grant authority. There is no wildcard Capability.
-- **No tree traversal**: Cross-node authorization does not traverse the ownership tree. State updates remain O(subscribers for that field).
+- **Relationship ≠ Authorization**: A Relationship connects two Nodes but does NOT grant access. A Grant must be issued explicitly.
+- **Explicit Grant selection**: `subscribeAs()` requires the caller to supply the Grant directly. When multiple Grants exist on the same Relationship, the subscription uses exactly the one the caller intends — no implicit "first active Grant" search.
+- **Authorization at subscription time**: Authorization is checked once when `subscribeAs()` is called, not on every state mutation. The normal mutation path (`notifyField → _fieldIndex → schedule → flush`) is completely unchanged.
+- **AuthorizedView — not the raw Node**: The `subscribeAs()` callback receives only an `AuthorizedView<S>` — a capability-filtered, Phase-B-tracked state surface. It cannot reach the real `ReactiveNode`, its internal Symbols, raw state, or mutating proxy.
+- **Capability is top-level-field based**: `capability(['balance'])` authorizes the `balance` key. There is no wildcard, no deep path syntax, and no merged-capability semantics. Deep authorization (e.g. `profile.password`) is a Phase D concern.
+- **Revocation semantics**: Revoking a Grant disposes only its own linked subscriptions. Other Grants on the same Relationship are unaffected. Re-granting does NOT automatically restore old subscriptions.
+- **Owner authority distinct**: Owner authority is structural, not Grant-based. No wildcard Capability exists.
+- **No tree traversal**: Cross-node authorization never traverses the ownership tree at mutation time.
 
 ### Security Boundaries
 
-- KinAuthError provides clear error codes for authorization failures.
+- `AuthorizedView` exposes only `state` — no `actions`, `destroy`, `child`, `isParent`, `isChild`, or internal Symbols.
+- `AuthorizedView` is `Object.freeze()`d — property injection is rejected.
+- Reading a denied field through `view.state` throws `KinAuthError('FIELD_NOT_GRANTED')` — no dependency is registered for denied reads.
+- `KinAuthError` provides deterministic error codes: `GRANT_REVOKED`, `RELATIONSHIP_DESTROYED`, `GRANT_MISMATCH`, `FIELD_NOT_GRANTED`, `NO_RELATIONSHIP`, `NO_GRANT`.
+- A Grant issued for A→B cannot authorize A→C or X→B (`GRANT_MISMATCH`).
 - Relationship destruction revokes all Grants and linked subscriptions.
 - Node destruction automatically destroys its Relationships and Grants.
-- No internal node identity fields are exposed through public APIs.
+- The `readSnapshot` inside each Grant is captured at creation time — mutating the original `Capability` or its `read` Set after the Grant is issued cannot expand access.
+- Internal implementation details (`ReactiveScope`, `REACTIVE_NODE_INTERNAL`, `GRANT_INTERNAL`, `validateGrant`, etc.) are not accessible through the public API.
 
 ---
 
@@ -281,10 +294,10 @@ kin-prototype/
 │   ├── node.test.ts                # Phase A tests (31 tests)
 │   ├── reactive.test.ts            # Phase B tests (35 tests)
 │   ├── reactive-hardening.test.ts  # Phase B hardening tests (26 tests)
-│   ├── phase-b-gate.test.ts        # Phase B gate tests (26 tests)
-│   └── phase-c.test.ts             # Phase C tests (30+ tests)
+│   ├── phase-b-gate.test.ts        # Phase B gate tests (19 tests)
+│   └── phase-c.test.ts             # Phase C tests (48 tests)
 ├── benchmark/
-│   └── bench.ts            # Phase B synthetic benchmark (S1–S6)
+│   └── bench.ts            # Phase B + Phase C synthetic benchmarks (S1–S6, C1–C2)
 ├── package.json
 ├── tsconfig.json
 └── .gitignore
@@ -302,8 +315,8 @@ npm test
 Expected output:
 
 ```
-ℹ tests 150+
-ℹ pass  150+
+ℹ tests 159
+ℹ pass  159
 ℹ fail  0
 ```
 
