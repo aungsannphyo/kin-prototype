@@ -2,7 +2,7 @@
 
 A minimal frontend UI framework built from scratch around a **family/relationship mental model**.
 
-This repository is an active prototype. Phases A, B, C, and D are complete.
+This repository is an active prototype. Phases A, B, C, D, and E are complete.
 
 ---
 
@@ -111,16 +111,20 @@ const home = createReactiveHome();
 const account = home.node({
   state: { balance: 100 },
   actions: {
-    deposit(ctx, amount: number) { ctx.state.balance += amount },
-    withdraw(ctx, amount: number) { ctx.state.balance -= amount },
+    deposit(ctx, amount: number) {
+      ctx.state.balance += amount;
+    },
+    withdraw(ctx, amount: number) {
+      ctx.state.balance -= amount;
+    },
   },
 });
 
-account.state.balance;       // 100
+account.state.balance; // 100
 account.state.balance = 999; // TypeError — readonly outside action
 
 account.actions.deposit(50);
-account.state.balance;       // 150
+account.state.balance; // 150
 
 const sub = home.subscribe(() => {
   console.log("balance:", account.state.balance);
@@ -185,12 +189,16 @@ import { createReactiveHome, capability } from "kin-prototype";
 const home = createReactiveHome();
 
 const alice = home.node({ state: { balance: 100 } });
-const bob   = home.node({
+const bob = home.node({
   state: { balance: 50 },
-  actions: { deposit(ctx, n: number) { ctx.state.balance += n } },
+  actions: {
+    deposit(ctx, n: number) {
+      ctx.state.balance += n;
+    },
+  },
 });
 
-const rel   = home.relationship(alice, bob);
+const rel = home.relationship(alice, bob);
 const grant = rel.grant(capability(["balance"]));
 
 home.subscribeAs(alice, bob, grant, (view) => {
@@ -232,7 +240,7 @@ Phase C Capability was top-level-field based: `capability(['balance'])` authoriz
 Phase D extends this with **explicit nested path authorization**:
 
 ```ts
-capability(["balance", "profile.name", "profile.email"])
+capability(["balance", "profile.name", "profile.email"]);
 ```
 
 This allows fine-grained control over which nested fields are accessible through the `AuthorizedView`.
@@ -248,38 +256,40 @@ path    := segment ('.' segment)*
 
 **Invalid paths** — rejected at `capability()` time with `TypeError`:
 
-| Pattern | Reason |
-| ------- | ------ |
-| `""` | Empty string |
-| `"0"`, `"items.0"` | Numeric segments |
-| `"__proto__"`, `"constructor"`, `"prototype"` | Prototype-chain names |
-| `"__anything"` | Double-underscore prefix |
-| `"profile."`, `".profile"`, `"a..b"` | Invalid dot placement |
-| `"profile-name"`, `"profile name"` | Non-identifier characters |
+| Pattern                                       | Reason                    |
+| --------------------------------------------- | ------------------------- |
+| `""`                                          | Empty string              |
+| `"0"`, `"items.0"`                            | Numeric segments          |
+| `"__proto__"`, `"constructor"`, `"prototype"` | Prototype-chain names     |
+| `"__anything"`                                | Double-underscore prefix  |
+| `"profile."`, `".profile"`, `"a..b"`          | Invalid dot placement     |
+| `"profile-name"`, `"profile name"`            | Non-identifier characters |
 
 ### Authorization semantics
 
 Three rules apply at read time:
 
-| Situation | Behavior |
-| --------- | -------- |
-| Path is in capability exactly | ✓ allow — return value |
-| Path has an authorized ancestor (`'profile'` grants `'profile.name'`) | ✓ allow — return value (subtree grant) |
-| Path has an authorized descendant only | ✓ allow — return a **filtered nested proxy** |
-| No match | ✗ throw `KinAuthError('FIELD_NOT_GRANTED')` |
+| Situation                                                             | Behavior                                     |
+| --------------------------------------------------------------------- | -------------------------------------------- |
+| Path is in capability exactly                                         | ✓ allow — return value                       |
+| Path has an authorized ancestor (`'profile'` grants `'profile.name'`) | ✓ allow — return value (subtree grant)       |
+| Path has an authorized descendant only                                | ✓ allow — return a **filtered nested proxy** |
+| No match                                                              | ✗ throw `KinAuthError('FIELD_NOT_GRANTED')`  |
 
 ### API example
 
 ```ts
-const rel   = home.relationship(source, target);
-const grant = rel.grant(capability(["balance", "profile.name", "profile.email"]));
+const rel = home.relationship(source, target);
+const grant = rel.grant(
+  capability(["balance", "profile.name", "profile.email"]),
+);
 
 home.subscribeAs(source, target, grant, (view) => {
-  view.state.balance               // ✓ allowed
-  view.state.profile.name          // ✓ allowed — filtered nested proxy
-  view.state.profile.email         // ✓ allowed
-  view.state.profile.password      // ✗ throws FIELD_NOT_GRANTED
-  view.state.secret                // ✗ throws FIELD_NOT_GRANTED
+  view.state.balance; // ✓ allowed
+  view.state.profile.name; // ✓ allowed — filtered nested proxy
+  view.state.profile.email; // ✓ allowed
+  view.state.profile.password; // ✗ throws FIELD_NOT_GRANTED
+  view.state.secret; // ✗ throws FIELD_NOT_GRANTED
 });
 ```
 
@@ -307,6 +317,163 @@ Two independent protection layers:
 
 ---
 
+## Phase E — View / Rendering
+
+Implemented and stable. Built on top of Phase A–D. No changes to the reactive kernel or authorization system.
+
+### Architecture
+
+Phase E introduces a declarative View layer that is **platform-independent** and **component-free**:
+
+```
+View Definition (plain function)
+      ↓
+ChildNode descriptor (immutable)
+      ↓
+Renderer (DOM in Phase E.2)
+      ↓
+DOM
+```
+
+### Phase E.1 — View Model
+
+Immutable, platform-independent descriptor types:
+
+| Type              | Description                                                                       |
+| ----------------- | --------------------------------------------------------------------------------- |
+| `ChildNode`       | Discriminated union: `ElementNode \| TextNode \| FragmentNode \| ConditionalNode` |
+| `ElementNode`     | HTML/XML element with tag, props, children                                        |
+| `TextNode`        | Text content (static string or reactive getter)                                   |
+| `FragmentNode`    | Grouping node without DOM element                                                 |
+| `ConditionalNode` | Condition-based branch (`when()`)                                                 |
+
+**Key design**:
+
+- No DOM dependency in E.1 — descriptors work without browser
+- `EventHandler` branding via `handler()` — distinguishes event callbacks from reactive getters
+- All descriptors are `Object.freeze()`d with readonly children arrays
+
+### Phase E.2 — DOM Renderer
+
+Fine-grained DOM renderer that:
+
+- Walks the descriptor tree once at mount
+- Creates one Kin subscription per reactive getter/condition
+- Updates only the affected DOM node on state change
+- No Virtual DOM, no diffing, no whole-tree rerender
+
+**Update path** (unchanged kernel):
+
+```
+Action → mutation proxy → notifyField → _fieldIndex → schedule → flush
+      → affected subscription → single DOM node update
+```
+
+### Phase E.3 — View Composition
+
+**Views are plain functions**, not components:
+
+```ts
+function Header(): ChildNode {
+  return element("header", {}, text("Kin"));
+}
+
+function Counter(node: ReactiveNode): ChildNode {
+  return element(
+    "button",
+    { onClick: handler(() => node.actions.increment()) },
+    text(() => String(node.state.count)),
+  );
+}
+
+function App(node: ReactiveNode): ChildNode {
+  return element("main", {}, Header(), Counter(node));
+}
+```
+
+**Key guarantees**:
+
+- View functions execute once at mount, not on every state change
+- Composition is ordinary function composition
+- No component instances, lifecycle hooks, or VDOM
+- Fine-grained reactive bindings remain independent
+- Authorization boundaries preserved
+
+### API example
+
+```ts
+import {
+  createReactiveHome,
+  mount,
+  element,
+  text,
+  handler,
+} from "kin-prototype";
+
+const home = createReactiveHome();
+const counter = home.node({
+  state: { count: 0 },
+  actions: {
+    increment(ctx) {
+      ctx.state.count++;
+    },
+  },
+});
+
+const view = element(
+  "button",
+  { onClick: handler(() => counter.actions.increment()) },
+  text(() => String(counter.state.count)),
+);
+
+const container = document.getElementById("app");
+const handle = mount(home, view, container);
+
+// Click triggers action → reactive update → DOM text changes
+// No View function rerun
+
+handle.unmount();
+home.destroy();
+```
+
+### Phase E boundaries
+
+**NOT implemented** (out of scope for E.1–E.3):
+
+- JSX
+- Virtual DOM
+- Component instances/lifecycle
+- Hooks (useState, useEffect, etc.)
+- Deep reactive tracking (deferred)
+- SSR/hydration
+- Forms framework
+- Routing
+
+### Phase E project structure
+
+```
+src/
+├── view/
+│   ├── types.ts    # ChildNode descriptors
+│   ├── factory.ts  # element(), text(), fragment(), when(), handler()
+│   └── index.ts    # View module exports
+├── dom/
+│   ├── types.ts    # View, MountHandle
+│   ├── renderer.ts # mount() with fine-grained bindings
+│   └── index.ts    # DOM module exports
+```
+
+---
+
+### Capability immutability
+
+Two independent protection layers:
+
+1. `capability(fields)` snapshots the input array at call time. Pushing to `fields` after the fact does not affect the Capability.
+2. `_readSnapshot` inside each Grant is a fresh `Set` captured at Grant-creation time. Even if the Capability's `read` Set is cast and mutated, the Grant's snapshot is unaffected.
+
+---
+
 ## Project Structure
 
 ```
@@ -321,13 +488,24 @@ kin-prototype/
 │   ├── relationship.ts     # Phase C/D Relationship, Grant, Capability + path validation
 │   ├── grant.ts            # Phase C GrantStore
 │   ├── authorization.ts    # Phase C/D authorization, AuthorizedView, nested proxy
+│   ├── view/
+│   │   ├── types.ts        # Phase E.1 — ChildNode descriptors
+│   │   ├── factory.ts      # Phase E.1 — element(), text(), fragment(), when(), handler()
+│   │   └── index.ts        # View module exports
+│   ├── dom/
+│   │   ├── types.ts        # Phase E.2 — View, MountHandle
+│   │   ├── renderer.ts     # Phase E.2 — mount() with fine-grained bindings
+│   │   └── index.ts        # DOM module exports
 │   └── index.ts            # Public exports
 ├── test/
 │   ├── node.test.ts                # Phase A tests (31)
 │   ├── reactive.test.ts            # Phase B tests (35)
 │   ├── reactive-hardening.test.ts  # Phase B hardening (26)
 │   ├── phase-b-gate.test.ts        # Phase B gate (19)
-│   └── phase-c.test.ts             # Phase C + D tests (88 — 48 Phase C, 40 Phase D)
+│   ├── phase-c.test.ts             # Phase C + D tests (88 — 48 Phase C, 40 Phase D)
+│   ├── phase-e1.test.ts            # Phase E.1 tests (24)
+│   ├── phase-e2.test.ts            # Phase E.2 tests (28)
+│   └── phase-e3.test.ts            # Phase E.3 tests (22)
 ├── benchmark/
 │   └── bench.ts            # Benchmarks S1–S6, C1–C4
 ├── package.json
@@ -347,8 +525,8 @@ npm test
 Expected output:
 
 ```
-ℹ tests 199
-ℹ pass  199
+ℹ tests 343
+ℹ pass  343
 ℹ fail  0
 ```
 
@@ -368,18 +546,19 @@ node --import tsx/esm benchmark/bench.ts
 
 ## Completed Phases
 
-| Phase | Status      | Description                                                                           |
-| ----- | ----------- | ------------------------------------------------------------------------------------- |
-| A     | ✅ Complete | Home, Node, Ownership, State, Actions, Lifecycle, Cascade Destroy                    |
-| B     | ✅ Complete | Field-level reactivity, subscribers, batching, lifecycle cleanup                     |
-| C     | ✅ Complete | Relationship, Grant, Capability, Authorization, Cross-node access, AuthorizedView    |
-| D     | ✅ Complete | Nested path authorization, path validation, filtered nested proxies, subtree grants  |
+| Phase | Status      | Description                                                                                      |
+| ----- | ----------- | ------------------------------------------------------------------------------------------------ |
+| A     | ✅ Complete | Home, Node, Ownership, State, Actions, Lifecycle, Cascade Destroy                                |
+| B     | ✅ Complete | Field-level reactivity, subscribers, batching, lifecycle cleanup                                 |
+| C     | ✅ Complete | Relationship, Grant, Capability, Authorization, Cross-node access, AuthorizedView                |
+| D     | ✅ Complete | Nested path authorization, path validation, filtered nested proxies, subtree grants              |
+| E     | ✅ Complete | View model, DOM renderer, fine-grained reactive bindings, View composition, no component runtime |
 
 ---
 
 ## Deferred Findings
 
-**Deep reactive tracking** — `node.state.profile.name` registers a dep on `"profile"`, not `"profile.name"`. In-place mutation of nested objects does not notify subscribers. Replacing the whole object does. Phase D authorization is fine-grained; Phase D reactivity is not. Deep reactive tracking (`nodeId:profile.name`) is Phase E scope.
+**Deep reactive tracking** — `node.state.profile.name` registers a dep on `"profile"`, not `"profile.name"`. In-place mutation of nested objects does not notify subscribers. Replacing the whole object does. Phase D authorization is fine-grained; Phase D reactivity is not. Deep reactive tracking (`nodeId:profile.name`) remains deferred beyond Phase E.
 
 **`ReadonlyState<S>` is shallow** — TypeScript readonly does not cover nested objects. Runtime protection is enforced by the authorization proxy, not the TypeScript type system.
 

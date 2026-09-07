@@ -53,3 +53,36 @@ export type {
   KinAuthErrorCode,
   AuthorizedView,
 } from './relationship.js'
+
+// ---------------------------------------------------------------------------
+// Phase E — View / Rendering
+// ---------------------------------------------------------------------------
+
+export { mount } from './dom/index.js'
+
+export type {
+  View,
+  MountHandle,
+} from './dom/index.js'
+
+export {
+  element,
+  text,
+  fragment,
+  when,
+  handler,
+  isEventHandler,
+} from './view/index.js'
+
+export type {
+  ChildNode,
+  ElementNode,
+  TextNode,
+  FragmentNode,
+  ConditionalNode,
+  PropValue,
+  ReactiveGetter,
+  EventHandler,
+} from './view/index.js'
+
+export { EVENT_HANDLER_BRAND } from './view/index.js'

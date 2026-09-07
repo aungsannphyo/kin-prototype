@@ -204,9 +204,9 @@ header('Phase D — Denied access (FIELD_NOT_GRANTED expected)')
 // The authorization enforcement is identical — the isolation is purely for
 // demo script cleanliness.
 const deniedAttempts: Array<[string, (s: Record<string, unknown>) => void]> = [
-  ['profile.address',  (s) => void readField(s, 'profile', 'address')],
-  ['profile.password', (s) => void readField(s, 'profile', 'password')],
-  ['balance',          (s) => void s['balance']],
+  ['profile.address',  (s) => { readField(s, 'profile', 'address') }],
+  ['profile.password', (s) => { readField(s, 'profile', 'password') }],
+  ['balance',          (s) => { String(s['balance']) }],  // Intentionally access denied field (will throw)
 ]
 
 for (const [label, accessor] of deniedAttempts) {
@@ -242,8 +242,8 @@ alice.actions.updateName('Alice Wonderland')
 await home.flush()
 
 ok('seenUpdates.length after name change', seenUpdates.length)
-ok('latest name seen by Bob',  seenUpdates[seenUpdates.length - 1].name)
-ok('latest email seen by Bob', seenUpdates[seenUpdates.length - 1].email)
+ok('latest name seen by Bob',  seenUpdates.at(-1)!.name)
+ok('latest email seen by Bob', seenUpdates.at(-1)!.email)
 
 // Balance change does NOT affect the profile subscriber.
 const countBefore = seenUpdates.length
@@ -319,7 +319,7 @@ header('Phase C — Node destruction cascades to Relationships')
 
 const carol    = home.node({ state: { id: 'carol' } })
 const carolRel = home.relationship(alice, carol)
-void carolRel.grant(capability(['profile.email']))
+carolRel.grant(capability(['profile.email']))
 
 ok('carolRel.isDestroyed before carol.destroy()', carolRel.isDestroyed)
 carol.destroy()
