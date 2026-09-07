@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx/esm --test test/node.test.ts test/reactive.test.ts test/reactive-hardening.test.ts test/phase-b-gate.test.ts test/phase-c.test.ts test/demo.test.ts test/phase-e1.test.ts",
+    "test": "node --import tsx/esm --test test/node.test.ts test/reactive.test.ts test/reactive-hardening.test.ts test/phase-b-gate.test.ts test/phase-c.test.ts test/demo.test.ts test/phase-e1.test.ts test/phase-e2.test.ts",
+    "bench": "node --import tsx/esm benchmark/bench.ts",
     "demo": "node --import tsx/esm demo/account-sharing.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "happy-dom": "^20.14.0",
     "tsx": "4.19.1",
     "typescript": "5.5.4"
   }
