@@ -399,6 +399,70 @@ function App(node: ReactiveNode): ChildNode {
 - Fine-grained reactive bindings remain independent
 - Authorization boundaries preserved
 
+### Phase E.4 — Browser Interaction & Event-to-Action Boundary
+
+**Phase E.4 hardens the event interaction path**:
+
+```
+DOM Event
+  ↓
+EventHandler (branded via handler())
+  ↓
+Application callback
+  ↓
+Kin Action
+  ↓
+State Mutation
+  ↓
+Reactive Subscription
+  ↓
+Targeted DOM Update
+```
+
+**Key architectural guarantees**:
+
+- **EventHandler branding is authoritative** — `isEventHandler()` distinguishes event callbacks from reactive getters using the `EVENT_HANDLER_BRAND` symbol, NOT property name heuristics
+- **Renderer is generic** — the DOM renderer knows about DOM, EventHandler, ChildNode, and subscriptions, but NOT about Actions, Nodes, Relationships, Grants, or authorization
+- **Application code connects events to Kin Actions** — the renderer only executes the EventHandler; the application decides what the handler does
+- **Native events** — handlers receive native browser events; no synthetic event system
+- **No View rerender** — state updates patch only the affected DOM binding; View functions execute once at mount
+- **Listener cleanup** — every DOM listener is tracked; unmount removes listeners, subscriptions, and DOM nodes
+- **Conditional listeners** — conditional branches create/remove listeners as they mount/unmount; no duplicate or stale listeners
+- **Authorization boundaries preserved** — AuthorizedView does not leak Node, Action, Grant, or Relationship internals to event handlers
+
+**Event naming**:
+
+The `onXxx` naming convention is only a property naming convention. The renderer converts `onClick` → `click`, `onInput` → `input`, etc., but any property name can be used as long as the value is a branded EventHandler.
+
+**Example**:
+
+```ts
+function Counter(node: ReactiveNode): ChildNode {
+  return element(
+    "button",
+    {
+      onClick: handler(() => {
+        node.actions.increment();
+      }),
+    },
+    text(() => String(node.state.count)),
+  );
+}
+```
+
+**Event handler identification**:
+
+```ts
+// ✅ Correct — branded handler
+onClick: handler(() => node.actions.increment());
+
+// ❌ Wrong — plain getter treated as data binding, not event
+onClick: () => String(node.state.count);
+
+// ✅ Also correct — non-onXxx name with brand works
+click: handler(() => node.actions.increment());
+```
+
 ### API example
 
 ```ts
@@ -505,7 +569,8 @@ kin-prototype/
 │   ├── phase-c.test.ts             # Phase C + D tests (88 — 48 Phase C, 40 Phase D)
 │   ├── phase-e1.test.ts            # Phase E.1 tests (24)
 │   ├── phase-e2.test.ts            # Phase E.2 tests (28)
-│   └── phase-e3.test.ts            # Phase E.3 tests (22)
+│   ├── phase-e3.test.ts            # Phase E.3 tests (22)
+│   └── phase-e4.test.ts            # Phase E.4 tests (26)
 ├── benchmark/
 │   └── bench.ts            # Benchmarks S1–S6, C1–C4
 ├── package.json
@@ -525,8 +590,8 @@ npm test
 Expected output:
 
 ```
-ℹ tests 343
-ℹ pass  343
+ℹ tests 371
+ℹ pass  371
 ℹ fail  0
 ```
 
