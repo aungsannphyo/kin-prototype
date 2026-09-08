@@ -450,6 +450,112 @@ function Counter(node: ReactiveNode): ChildNode {
 }
 ```
 
+### Phase E.5 — Real Application Composition & End-to-End Validation
+
+**Phase E.5 is an integration/validation phase** — it does NOT introduce new framework primitives. Instead, it proves that the existing Kin architecture can build a realistic browser application using ONLY primitives from Phases A–E.4.
+
+**Complete application flow**:
+
+```
+State
+  ↓
+Actions
+  ↓
+Relationships
+  ↓
+Grants
+  ↓
+Deep Authorization
+  ↓
+AuthorizedView
+  ↓
+View Composition
+  ↓
+DOM Renderer
+  ↓
+Browser Event
+  ↓
+EventHandler
+  ↓
+Kin Action
+  ↓
+State Mutation
+  ↓
+Fine-Grained Reactive DOM Update
+```
+
+**Application scenario**:
+
+The demo implements the **Account Sharing / Customer Access** scenario:
+
+- **Alice Node**: Owns account with `balance` and `profile` (name, email, address, password)
+- **Bob Node**: Separate observer node
+- **Relationship**: Bob → Alice (Bob observes Alice)
+- **Grant**: Restricted capability for `profile.name` and `profile.email` only
+- **AuthorizedView**: Bob receives filtered view of Alice's state
+- **Browser UI**: Alice sees full account; Bob sees only authorized fields
+
+**Key architectural validations**:
+
+- **No component runtime**: Views are plain TypeScript functions, not React-like components
+- **Authorization enforced at source**: Unauthorized fields (balance, address, password) cannot reach Bob's View or DOM — not merely hidden
+- **Fine-grained reactivity**: Changing balance does not execute name/email bindings
+- **No View rerender**: View functions execute once at mount; state changes update only affected DOM bindings
+- **Event → Action flow**: Browser events invoke branded EventHandlers, which call Kin Actions
+- **DOM identity preserved**: Reactive updates maintain existing DOM node references
+- **Lifecycle independence**: DOM unmount, grant revocation, and node destruction are independent operations
+
+**Example application structure**:
+
+```ts
+// Alice's account view (full access)
+function AliceAccount(node: ReactiveNode): ChildNode {
+  return element(
+    "section",
+    {},
+    element("div", {}, text(`Balance: $${node.state.balance}`)),
+    element(
+      "button",
+      {
+        onClick: handler(() => node.actions.deposit(100)),
+      },
+      text("Deposit $100"),
+    ),
+  );
+}
+
+// Bob's shared view (authorized access only)
+function BobSharedView(view: AuthorizedView): ChildNode {
+  return element(
+    "section",
+    {},
+    text(`Name: ${view.state.profile.name}`), // ✓ authorized
+    text(`Email: ${view.state.profile.email}`), // ✓ authorized
+    // view.state.balance → throws FIELD_NOT_GRANTED
+    // view.state.profile.password → throws FIELD_NOT_GRANTED
+  );
+}
+```
+
+**Why no component runtime is necessary**:
+
+- Plain function composition provides all needed reusability
+- View functions execute once at mount, eliminating the need for component lifecycle hooks
+- Fine-grained reactive bindings eliminate the need for VDOM diffing
+- Authorization is handled by Grant/AuthorizedView, not by component props/context
+- Event handlers are branded functions, not component methods
+
+**Demo files**:
+
+- `demo/browser-app.ts` — Browser application demo with account sharing UI
+- `test/phase-e5.test.ts` — 18 integration test categories validating end-to-end flow
+
+**Run the browser demo**:
+
+```bash
+npm run browser-demo
+```
+
 **Event handler identification**:
 
 ```ts
@@ -502,7 +608,7 @@ home.destroy();
 
 ### Phase E boundaries
 
-**NOT implemented** (out of scope for E.1–E.3):
+**NOT implemented** (out of scope for E.1–E.5):
 
 - JSX
 - Virtual DOM
@@ -590,8 +696,8 @@ npm test
 Expected output:
 
 ```
-ℹ tests 371
-ℹ pass  371
+ℹ tests 389
+ℹ pass  389
 ℹ fail  0
 ```
 
