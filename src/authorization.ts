@@ -241,6 +241,47 @@ function _createNestedProxy(
         `Cannot define property "${String(prop)}" on an AuthorizedView.`
       )
     },
+
+    ownKeys(_target) {
+      // Return only authorized field names from subSnapshot
+      // This prevents Object.keys() from leaking unauthorized fields
+      return [...subSnapshot]
+    },
+
+    getOwnPropertyDescriptor(_target, prop) {
+      // Symbol-keyed access: pass through silently.
+      if (typeof prop !== 'string') {
+        return Reflect.getOwnPropertyDescriptor(_target, prop)
+      }
+
+      // Block prototype-chain access.
+      if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+        return undefined
+      }
+
+      const match = _matchPath(subSnapshot, prop)
+
+      if (match === 'deny') {
+        throw new KinAuthError(
+          'FIELD_NOT_GRANTED',
+          `Cross-node access denied: field "${prop}" is not in the Grant's Capability.`
+        )
+      }
+
+      return Reflect.getOwnPropertyDescriptor(_target, prop)
+    },
+
+    setPrototypeOf(_target, _proto) {
+      throw new TypeError('Cannot set prototype on an AuthorizedView.')
+    },
+
+    preventExtensions(_target) {
+      throw new TypeError('Cannot prevent extensions on an AuthorizedView.')
+    },
+
+    getPrototypeOf(_target) {
+      return null
+    },
   })
 
   return proxy
@@ -344,6 +385,47 @@ export function createAuthorizedView<S extends StateRecord>(
       throw new TypeError(
         `Cannot define property "${String(prop)}" on an AuthorizedView.`
       )
+    },
+
+    ownKeys(_target) {
+      // Return only authorized field names from readSnapshot
+      // This prevents Object.keys() from leaking unauthorized fields
+      return [...readSnapshot]
+    },
+
+    getOwnPropertyDescriptor(_target, prop) {
+      // Symbol-keyed access: pass through silently.
+      if (typeof prop !== 'string') {
+        return Reflect.getOwnPropertyDescriptor(_target, prop)
+      }
+
+      // Block prototype-chain access.
+      if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+        return undefined
+      }
+
+      const match = _matchPath(readSnapshot, prop)
+
+      if (match === 'deny') {
+        throw new KinAuthError(
+          'FIELD_NOT_GRANTED',
+          `Cross-node access denied: field "${prop}" is not in the Grant's Capability.`
+        )
+      }
+
+      return Reflect.getOwnPropertyDescriptor(_target, prop)
+    },
+
+    setPrototypeOf(_target, _proto) {
+      throw new TypeError('Cannot set prototype on an AuthorizedView.')
+    },
+
+    preventExtensions(_target) {
+      throw new TypeError('Cannot prevent extensions on an AuthorizedView.')
+    },
+
+    getPrototypeOf(_target) {
+      return null
     },
   }) as ReadonlyState<S>
 
