@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx/esm --test test/node.test.ts test/reactive.test.ts test/reactive-hardening.test.ts test/phase-b-gate.test.ts test/phase-c.test.ts test/demo.test.ts test/phase-e1.test.ts test/phase-e2.test.ts test/phase-e3.test.ts test/phase-e4.test.ts test/phase-e5.test.ts",
+    "test": "node --import tsx/esm --test test/**/*.test.ts",
     "bench": "node --import tsx/esm benchmark/bench.ts",
     "demo": "node --import tsx/esm demo/account-sharing.ts",
     "browser-demo": "node --import tsx/esm demo/browser-app.ts"

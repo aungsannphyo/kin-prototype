@@ -17,8 +17,12 @@
  *
  * Field key format:  "<nodeId>:<fieldName>"   e.g. "n3:balance"
  *
+ * IMPORTANT: Reactive dependency tracking is TOP-LEVEL only.
+ * Reading node.state.profile.name tracks dependency on "profile", not "profile.name".
+ * Deep readonly is for mutation protection, not for deep reactivity.
+ *
  * Phase A invariants preserved:
- *  - node.state is a readonly proxy (throws on external set)
+ *  - node.state is a deep readonly proxy (throws on external set at any nesting level)
  *  - Actions are the only mutation boundary
  *  - Lifecycle guards are unchanged
  *  - Cascade destroy (post-order) is unchanged
@@ -138,24 +142,165 @@ export function nextNodeId(): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build a deep readonly proxy for nested state objects and arrays.
+ * This provides runtime mutation protection at all nesting levels.
+ * 
+ * IMPORTANT: This is for mutation protection ONLY. No reactive dependency
+ * tracking occurs at nested levels — only top-level field tracking is used.
+ * 
+ * get  — returns value, wrapping objects/arrays recursively
+ * set  — throws TypeError (readonly)
+ * deleteProperty — throws TypeError
+ * defineProperty — throws TypeError
+ * setPrototypeOf — throws TypeError
+ * preventExtensions — throws TypeError
+ */
+function makeDeepReadonlyProxy(
+  raw: unknown,
+  proxyCache: WeakMap<object, unknown>
+): unknown {
+  // Handle non-object values (primitives, null, undefined, functions, etc.)
+  if (raw === null || typeof raw !== 'object') {
+    return raw
+  }
+  
+  // Check cache to maintain proxy identity
+  if (proxyCache.has(raw)) {
+    return proxyCache.get(raw)
+  }
+  
+  // Handle arrays
+  if (Array.isArray(raw)) {
+    const arrayProxy = new Proxy(raw, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver)
+        
+        // Recursively wrap array elements
+        if (typeof value === 'object' && value !== null) {
+          return makeDeepReadonlyProxy(value, proxyCache)
+        }
+        
+        // Block mutating array methods
+        if (typeof prop === 'string' && [
+          'push', 'pop', 'shift', 'unshift', 'splice', 
+          'sort', 'reverse', 'fill', 'copyWithin'
+        ].includes(prop)) {
+          throw new TypeError(
+            `Cannot mutate array directly. Method "${prop}" is readonly outside of an action.`
+          )
+        }
+        
+        return value
+      },
+      set(_target, prop) {
+        throw new TypeError(
+          `Cannot mutate array directly. Index "${String(prop)}" is readonly outside of an action.`
+        )
+      },
+      deleteProperty(_target, prop) {
+        throw new TypeError(
+          `Cannot delete array element "${String(prop)}" outside of an action.`
+        )
+      },
+      defineProperty(_target, prop) {
+        throw new TypeError(
+          `Cannot define property "${String(prop)}" on readonly array outside of an action.`
+        )
+      },
+      setPrototypeOf(_target, _proto) {
+        throw new TypeError(
+          `Cannot set prototype on readonly array outside of an action.`
+        )
+      },
+      preventExtensions(_target) {
+        throw new TypeError(
+          `Cannot prevent extensions on readonly array outside of an action.`
+        )
+      },
+    })
+    
+    proxyCache.set(raw, arrayProxy)
+    return arrayProxy
+  }
+  
+  // Handle plain objects
+  const objectProxy = new Proxy(raw as object, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver)
+      
+      // Recursively wrap nested objects and arrays
+      if (typeof value === 'object' && value !== null) {
+        return makeDeepReadonlyProxy(value, proxyCache)
+      }
+      
+      return value
+    },
+    set(_target, prop) {
+      throw new TypeError(
+        `Cannot mutate state directly. Property "${String(prop)}" is readonly outside of an action.`
+      )
+    },
+    deleteProperty(_target, prop) {
+      throw new TypeError(
+        `Cannot delete state property "${String(prop)}" outside of an action.`
+      )
+    },
+    defineProperty(_target, prop) {
+      throw new TypeError(
+        `Cannot define property "${String(prop)}" on readonly state outside of an action.`
+      )
+    },
+    setPrototypeOf(_target, _proto) {
+      throw new TypeError(
+        `Cannot set prototype on readonly state outside of an action.`
+      )
+    },
+    preventExtensions(_target) {
+      throw new TypeError(
+        `Cannot prevent extensions on readonly state outside of an action.`
+      )
+    },
+  })
+  
+  proxyCache.set(raw, objectProxy)
+  return objectProxy
+}
+
+/**
  * Build the PUBLIC tracking+readonly proxy.
  *
  * get  — calls scope.trackField(nodeId + ":" + prop) then returns the value
+ *         wrapped in deep readonly proxy for objects/arrays
  * set  — throws TypeError (readonly outside action)
  * deleteProperty — throws TypeError
  * defineProperty — throws TypeError
+ * setPrototypeOf — throws TypeError
+ * preventExtensions — throws TypeError
+ * 
+ * IMPORTANT: Reactive dependency tracking remains at TOP-LEVEL only.
+ * Reading node.state.profile.name tracks dependency on "profile", not "profile.name".
+ * Deep readonly is for mutation protection, not for deep reactivity.
  */
 function makeTrackingReadonlyProxy<S extends StateRecord>(
   raw: S,
   nodeId: string,
   scope: ReactiveScope
 ): ReadonlyState<S> {
+  const proxyCache = new WeakMap<object, unknown>()
+  
   return new Proxy(raw, {
     get(target, prop, receiver) {
       if (typeof prop === 'string') {
         scope.trackField(`${nodeId}:${prop}`)
       }
-      return Reflect.get(target, prop, receiver)
+      const value = Reflect.get(target, prop, receiver)
+      
+      // Wrap nested objects and arrays in deep readonly proxies
+      if (typeof value === 'object' && value !== null) {
+        return makeDeepReadonlyProxy(value, proxyCache)
+      }
+      
+      return value
     },
     set(_target, prop) {
       throw new TypeError(
@@ -173,6 +318,16 @@ function makeTrackingReadonlyProxy<S extends StateRecord>(
         `Cannot define property "${String(prop)}" on readonly state outside of an action.`
       )
     },
+    setPrototypeOf(_target, _proto) {
+      throw new TypeError(
+        `Cannot set prototype on readonly state outside of an action.`
+      )
+    },
+    preventExtensions(_target) {
+      throw new TypeError(
+        `Cannot prevent extensions on readonly state outside of an action.`
+      )
+    },
   }) as ReadonlyState<S>
 }
 
@@ -182,6 +337,8 @@ function makeTrackingReadonlyProxy<S extends StateRecord>(
  * get  — plain read from raw (also tracks if a subscriber is running)
  * set  — lifecycle guard → Object.is check → write → notifyField
  * deleteProperty — lifecycle guard → reject (state shape must not change)
+ * setPrototypeOf — lifecycle guard → reject (state shape must not change)
+ * preventExtensions — lifecycle guard → reject (state shape must not change)
  *
  * NOTE: No defineProperty trap. Reflect.set internally calls [[DefineOwnProperty]]
  * for new properties on a Proxy target; a trap there would break normal assignment.
@@ -227,6 +384,26 @@ function makeMutatingProxy<S extends StateRecord>(
       }
       throw new TypeError(
         `Cannot delete state property "${String(prop)}" — state shape must not change.`
+      )
+    },
+    setPrototypeOf(_target, _proto) {
+      if (getLifecycle() === 'destroyed') {
+        throw new Error(
+          `Cannot modify state: node "${nodeId}" has been destroyed.`
+        )
+      }
+      throw new TypeError(
+        `Cannot set prototype on state — state shape must not change.`
+      )
+    },
+    preventExtensions(_target) {
+      if (getLifecycle() === 'destroyed') {
+        throw new Error(
+          `Cannot modify state: node "${nodeId}" has been destroyed.`
+        )
+      }
+      throw new TypeError(
+        `Cannot prevent extensions on state — state shape must not change.`
       )
     },
   }) as S

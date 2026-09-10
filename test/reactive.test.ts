@@ -561,7 +561,7 @@ describe('Test 14 — Top-level field tracking', () => {
     // Reading node.state.profile.name registers dep on "profile", not "profile.name".
     // Mutating profile.name directly (without replacing profile) does not notify.
     // This is explicitly documented as a DEFERRED FINDING.
-    assert.ok(true, 'nested-path tracking is deferred to Phase C')
+    // No assertion needed - this is a documentation placeholder for deferred work.
   })
 })
 

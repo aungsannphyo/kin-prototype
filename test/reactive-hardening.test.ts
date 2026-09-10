@@ -753,3 +753,730 @@ describe('NOTE — Bounded self-mutation does not corrupt runtime', () => {
     home.destroy()
   })
 })
+
+// ---------------------------------------------------------------------------
+// LCD-3  Failed initial subscription cleanup
+// ---------------------------------------------------------------------------
+
+describe('LCD-3 — Failed initial subscription cleanup', () => {
+  it('initial callback that throws disposes subscriber and cleans indexes', async () => {
+    const scope = createReactiveScope()
+    const initialCount = scope.subscriberCount()
+
+    let failedRuns = 0
+    assert.throws(() => {
+      scope.createSubscriber(() => {
+        failedRuns++
+        scope.trackField('n1:balance')
+        throw new Error('Initial callback failed')
+      })
+    }, /Initial callback failed/)
+
+    // Subscriber ran once, then was disposed
+    assert.equal(failedRuns, 1, 'failed callback should run once')
+    
+    // Subscriber must not be retained
+    assert.equal(scope.subscriberCount(), initialCount, 'subscriber count must not increase')
+
+    // Create a new subscriber to verify cleanup
+    let liveRuns = 0
+    scope.createSubscriber(() => {
+      liveRuns++
+      scope.trackField('n1:balance')
+    })
+
+    assert.equal(scope.subscriberCount(), initialCount + 1, 'new subscriber should be created')
+    assert.equal(liveRuns, 1, 'new subscriber should run once initially')
+
+    // Notify the field - only the live subscriber should run
+    scope.notifyField('n1:balance')
+    await scope.flushPromise()
+    
+    assert.equal(failedRuns, 1, 'failed subscriber should not run again')
+    assert.equal(liveRuns, 2, 'live subscriber should run on notification')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// NEST-1  Nested state mutation contract verification
+// ---------------------------------------------------------------------------
+
+describe('NEST-1 — Nested state mutation contract', () => {
+  it('ReactiveNode: nested mutation outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { profile: { name: 'Alice' } },
+      actions: {},
+    })
+
+    // Nested mutation outside Action should throw
+    assert.throws(() => {
+      (node.state.profile as { name: string }).name = 'Mallory'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('nested mutation through Action is allowed', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { profile: { name: 'Alice' } },
+      actions: {
+        setProfileName(ctx, name: string) {
+          ctx.state.profile.name = name
+        },
+      },
+    })
+
+    // Mutation through Action should work
+    node.actions.setProfileName('Mallory')
+    assert.equal(node.state.profile.name, 'Mallory')
+
+    home.destroy()
+  })
+})
+
+describe('NEST-2 — Deep nested object mutation protection', () => {
+  it('three-level nested mutation outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        profile: { 
+          address: { 
+            city: 'Yangon' 
+          } 
+        } 
+      },
+      actions: {},
+    })
+
+    // Deep nested mutation should throw
+    assert.throws(() => {
+      (node.state.profile.address as { city: string }).city = 'Mandalay'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('three-level nested mutation through Action is allowed', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        profile: { 
+          address: { 
+            city: 'Yangon' 
+          } 
+        } 
+      },
+      actions: {
+        setCity(ctx, city: string) {
+          ctx.state.profile.address.city = city
+        },
+      },
+    })
+
+    // Deep nested mutation through Action should work
+    node.actions.setCity('Mandalay')
+    assert.equal(node.state.profile.address.city, 'Mandalay')
+
+    home.destroy()
+  })
+})
+
+describe('NEST-3 — Complex nested structures', () => {
+  it('object inside array mutation outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        users: [
+          { name: 'Alice' }
+        ]
+      },
+      actions: {},
+    })
+
+    // Mutation of object inside array should throw
+    assert.throws(() => {
+      (node.state.users[0] as { name: string }).name = 'Bob'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('array inside object mutation outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        profile: { 
+          tags: ['admin', 'user'] 
+        } 
+      },
+      actions: {},
+    })
+
+    // Mutation of array inside object should throw
+    assert.throws(() => {
+      (node.state.profile.tags as string[]).push('moderator')
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('object inside array inside object mutation outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        team: {
+          members: [
+            { name: 'Alice' }
+          ]
+        }
+      },
+      actions: {},
+    })
+
+    // Deep nested mutation should throw
+    assert.throws(() => {
+      (node.state.team.members[0] as { name: string }).name = 'Bob'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HOME-1  Cross-Home Relationship isolation
+// ---------------------------------------------------------------------------
+
+describe('ARR-1 — Array index assignment protection', () => {
+  it('array index assignment outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    // Direct index assignment should throw
+    assert.throws(() => {
+      (node.state.roles as string[])[0] = 'moderator'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('array index assignment through Action is allowed', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {
+        setRole(ctx, index: number, role: string) {
+          ctx.state.roles[index] = role
+        },
+      },
+    })
+
+    // Index assignment through Action should work
+    node.actions.setRole(0, 'moderator')
+    assert.equal(node.state.roles[0], 'moderator')
+
+    home.destroy()
+  })
+})
+
+describe('ARR-2 — Array mutation methods protection', () => {
+  it('push method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).push('user')
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('pop method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).pop()
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('shift method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).shift()
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('unshift method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).unshift('user')
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('splice method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).splice(0, 1)
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('sort method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['user', 'admin'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).sort()
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('reverse method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).reverse()
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('fill method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).fill('guest')
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+
+  it('copyWithin method outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    assert.throws(() => {
+      (node.state.roles as string[]).copyWithin(0, 1)
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+})
+
+describe('ARR-3 — Array mutation through Action', () => {
+  it('push through Action is allowed', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin'] 
+      },
+      actions: {
+        addRole(ctx, role: string) {
+          ctx.state.roles.push(role)
+        },
+      },
+    })
+
+    node.actions.addRole('user')
+    assert.equal(node.state.roles.length, 2)
+    assert.equal(node.state.roles[1], 'user')
+
+    home.destroy()
+  })
+
+  it('splice through Action is allowed', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user', 'guest'] 
+      },
+      actions: {
+        removeRole(ctx, index: number) {
+          ctx.state.roles.splice(index, 1)
+        },
+      },
+    })
+
+    node.actions.removeRole(1)
+    assert.equal(node.state.roles.length, 2)
+    assert.equal(node.state.roles[1], 'guest')
+
+    home.destroy()
+  })
+})
+
+describe('ACT-NEST-1 — Action nested object mutation', () => {
+  it('nested object mutation through Action works at multiple levels', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        profile: { 
+          address: { 
+            city: 'Yangon',
+            country: 'Myanmar'
+          } 
+        } 
+      },
+      actions: {
+        updateCity(ctx, city: string) {
+          ctx.state.profile.address.city = city
+        },
+        updateCountry(ctx, country: string) {
+          ctx.state.profile.address.country = country
+        },
+      },
+    })
+
+    node.actions.updateCity('Mandalay')
+    node.actions.updateCountry('Burma')
+    
+    assert.equal(node.state.profile.address.city, 'Mandalay')
+    assert.equal(node.state.profile.address.country, 'Burma')
+
+    home.destroy()
+  })
+})
+
+describe('ACT-NEST-2 — Action nested array mutation', () => {
+  it('nested array mutation through Action works', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        team: {
+          members: ['Alice', 'Bob']
+        }
+      },
+      actions: {
+        addMember(ctx, name: string) {
+          ctx.state.team.members.push(name)
+        },
+        removeMember(ctx, index: number) {
+          ctx.state.team.members.splice(index, 1)
+        },
+      },
+    })
+
+    node.actions.addMember('Charlie')
+    assert.equal(node.state.team.members.length, 3)
+    assert.equal(node.state.team.members[2], 'Charlie')
+    
+    node.actions.removeMember(0)
+    assert.equal(node.state.team.members.length, 2)
+    assert.equal(node.state.team.members[0], 'Bob')
+
+    home.destroy()
+  })
+})
+
+describe('PROXY-1 — Proxy identity stability', () => {
+  it('nested object proxy identity is stable', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        profile: { 
+          name: 'Alice' 
+        } 
+      },
+      actions: {},
+    })
+
+    const profile1 = node.state.profile
+    const profile2 = node.state.profile
+    
+    // Same proxy should be returned for the same object
+    assert.strictEqual(profile1, profile2, 'proxy identity should be stable')
+
+    home.destroy()
+  })
+
+  it('array proxy identity is stable', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    const roles1 = node.state.roles
+    const roles2 = node.state.roles
+    
+    // Same proxy should be returned for the same array
+    assert.strictEqual(roles1, roles2, 'array proxy identity should be stable')
+
+    home.destroy()
+  })
+
+  it('nested object inside array proxy identity is stable', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        users: [
+          { name: 'Alice' }
+        ]
+      },
+      actions: {},
+    })
+
+    const user1 = (node.state.users as unknown[])[0]
+    const user2 = (node.state.users as unknown[])[0]
+    
+    // Same proxy should be returned for the same nested object
+    assert.strictEqual(user1, user2, 'nested object proxy identity should be stable')
+
+    home.destroy()
+  })
+})
+
+describe('REFLECT-NEST-1 — Reflection operations on nested objects', () => {
+  it('nested object property assignment outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        profile: { 
+          name: 'Alice',
+          email: 'alice@example.com'
+        } 
+      },
+      actions: {},
+    })
+
+    // Test direct property assignment
+    assert.throws(() => {
+      (node.state.profile as { name: string }).name = 'Bob'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+})
+
+describe('REFLECT-ARR-1 — Reflection operations on arrays', () => {
+  it('array index assignment outside Action throws', () => {
+    const home = createReactiveHome()
+    
+    const node = home.node({
+      state: { 
+        roles: ['admin', 'user'] 
+      },
+      actions: {},
+    })
+
+    // Test direct index assignment
+    assert.throws(() => {
+      (node.state.roles as string[])[0] = 'moderator'
+    }, /readonly outside of an action/)
+
+    home.destroy()
+  })
+})
+
+describe('HOME-1 — Cross-Home Relationship isolation', () => {
+  it('root-to-root same Home relationship succeeds', () => {
+    const home = createReactiveHome()
+    
+    const nodeA = home.node({
+      state: { name: 'NodeA' },
+      actions: {},
+    })
+    
+    const nodeB = home.node({
+      state: { name: 'NodeB' },
+      actions: {},
+    })
+
+    // Same-Home root-to-root relationship should work
+    const rel = home.relationship(nodeA, nodeB)
+    assert.ok(rel.id, 'relationship should have an id')
+    assert.equal(rel.source, nodeA, 'source should be nodeA')
+    assert.equal(rel.target, nodeB, 'target should be nodeB')
+
+    home.destroy()
+  })
+
+  it('parent-to-child same Home relationship succeeds', () => {
+    const home = createReactiveHome()
+    
+    const parent = home.node({
+      state: { name: 'Parent' },
+      actions: {},
+    })
+    
+    const child = parent.child({
+      state: { name: 'Child' },
+      actions: {},
+    })
+
+    // Same-Home parent-to-child relationship should work
+    const rel = home.relationship(parent, child)
+    assert.ok(rel.id, 'relationship should have an id')
+    assert.equal(rel.source, parent, 'source should be parent')
+    assert.equal(rel.target, child, 'target should be child')
+
+    home.destroy()
+  })
+
+  it('child-to-parent same Home relationship succeeds', () => {
+    const home = createReactiveHome()
+    
+    const parent = home.node({
+      state: { name: 'Parent' },
+      actions: {},
+    })
+    
+    const child = parent.child({
+      state: { name: 'Child' },
+      actions: {},
+    })
+
+    // Same-Home child-to-parent relationship should work
+    const rel = home.relationship(child, parent)
+    assert.ok(rel.id, 'relationship should have an id')
+    assert.equal(rel.source, child, 'source should be child')
+    assert.equal(rel.target, parent, 'target should be parent')
+
+    home.destroy()
+  })
+
+  it('cross-Home root-to-root relationship throws error', () => {
+    const homeA = createReactiveHome()
+    const homeB = createReactiveHome()
+    
+    const nodeA = homeA.node({
+      state: { name: 'NodeA' },
+      actions: {},
+    })
+    
+    const nodeB = homeB.node({
+      state: { name: 'NodeB' },
+      actions: {},
+    })
+
+    // Attempt to create relationship between nodes from different Homes
+    assert.throws(() => {
+      homeA.relationship(nodeA, nodeB)
+    }, /Cross-Home relationships are not supported/)
+
+    homeA.destroy()
+    homeB.destroy()
+  })
+
+  it('cross-Home parent-to-child relationship throws error', () => {
+    const homeA = createReactiveHome()
+    const homeB = createReactiveHome()
+    
+    const parent = homeA.node({
+      state: { name: 'Parent' },
+      actions: {},
+    })
+    
+    // Note: child belongs to homeA, but we try to relate to node from homeB
+    const nodeB = homeB.node({
+      state: { name: 'NodeB' },
+      actions: {},
+    })
+
+    // Attempt to create cross-Home relationship
+    assert.throws(() => {
+      homeA.relationship(parent, nodeB)
+    }, /Cross-Home relationships are not supported/)
+
+    homeA.destroy()
+    homeB.destroy()
+  })
+})

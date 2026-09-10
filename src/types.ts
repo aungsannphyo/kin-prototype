@@ -68,8 +68,13 @@ export type BoundActions<S extends StateRecord, A extends ActionsMap<S>> = {
 // ---------------------------------------------------------------------------
 // Readonly state — the public state surface on a Node.
 //
-// Values are deeply readonly at the TypeScript level.
-// Runtime enforcement is via a Proxy (see node.ts).
+// Values are readonly at the TypeScript level for top-level properties.
+// Runtime enforcement provides deep readonly protection for nested objects
+// and arrays via Proxy (see node.ts, reactive-node.ts).
+//
+// IMPORTANT: Reactive dependency tracking remains TOP-LEVEL only.
+// Reading node.state.profile.name tracks dependency on "profile", not "profile.name".
+// Deep readonly is for mutation protection, not for deep reactivity.
 // ---------------------------------------------------------------------------
 
 export type ReadonlyState<S extends StateRecord> = {

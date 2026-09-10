@@ -137,11 +137,10 @@ export function createReactiveScope(): ReactiveScope {
     _flushPromise = new Promise<void>((resolve) => {
       _flushResolve = resolve
     })
-    // Schedule the flush as a Promise microtask rather than queueMicrotask.
-    // Promise .then() callbacks and queueMicrotask callbacks are both
-    // microtasks, but node:test in Node 22 correctly drains Promise chains
-    // when awaiting a test. Using queueMicrotask can leave the callback
-    // pending past the point where node:test considers the event loop idle.
+    // Schedule the flush as a Promise microtask using Promise.resolve().then().
+    // This ensures node:test in Node 22 correctly drains Promise chains when
+    // awaiting a test, as Promise microtasks are part of the event loop cycle
+    // that node:test considers when determining test completion.
     void Promise.resolve().then(_flush)
   }
 
@@ -230,7 +229,13 @@ export function createReactiveScope(): ReactiveScope {
     }
     _subscribers.set(sub.id, sub)
     _depIndex.set(sub.id, new Set())
-    _runSubscriber(sub)
+    try {
+      _runSubscriber(sub)
+    } catch (e) {
+      // If the initial callback throws, clean up the subscriber completely
+      disposeSubscriber(sub)
+      throw e
+    }
     return sub
   }
 

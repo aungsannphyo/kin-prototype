@@ -25,6 +25,24 @@ import {
   type Relationship,
   type RelationshipInternal,
 } from './relationship.js'
+import { REACTIVE_NODE_INTERNAL } from './reactive-node.js'
+import { HOME_OWNER_TAG } from './types.js'
+
+// ---------------------------------------------------------------------------
+// Helper: Get the root Home for a node
+// ---------------------------------------------------------------------------
+
+function getNodeHome(node: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): unknown {
+  let currentOwner = (node as any)[REACTIVE_NODE_INTERNAL]._owner
+  while (currentOwner) {
+    if ('_tag' in currentOwner && currentOwner._tag === HOME_OWNER_TAG) {
+      return currentOwner
+    }
+    // Owner is another node, get its owner
+    currentOwner = (currentOwner as any)[REACTIVE_NODE_INTERNAL]?._owner
+  }
+  return null
+}
 
 // ---------------------------------------------------------------------------
 // GrantStore interface (internal to the framework)
@@ -79,6 +97,15 @@ export function createGrantStore(): GrantStore {
       source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
       target: ReactiveNode<StateRecord, ActionsMap<StateRecord>>
     ): Relationship {
+      // Cross-Home relationships are not supported
+      // Each Home owns its own nodes, relationships, and grants
+      const sourceHome = getNodeHome(source)
+      const targetHome = getNodeHome(target)
+      
+      if (sourceHome === null || targetHome === null || sourceHome !== targetHome) {
+        throw new Error('Cross-Home relationships are not supported. Nodes must belong to the same Home.')
+      }
+      
       const rel = createRelationship(source, target, _onRelDestroyed)
       _relationships.add(rel)
       return rel
