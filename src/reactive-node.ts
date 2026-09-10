@@ -39,6 +39,7 @@ import type {
 } from './types.js'
 import { HOME_OWNER_TAG } from './types.js'
 import type { ReactiveScope } from './reactive.js'
+import { validateStateRecord } from './validation.js'
 
 // ---------------------------------------------------------------------------
 // Internal-slot Symbol
@@ -142,11 +143,46 @@ export function nextNodeId(): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Check if a value is a plain object or array that should be proxied.
+ * v0.1 supports only primitives, plain objects, and arrays.
+ * Special objects (Date, RegExp, Map, Set, class instances) are excluded.
+ */
+function isPlainObjectOrArray(value: unknown): value is object {
+  if (value === null || typeof value !== 'object') {
+    return false
+  }
+  
+  // Arrays are supported
+  if (Array.isArray(value)) {
+    return true
+  }
+  
+  // Exclude special built-in objects using instanceof
+  if (value instanceof Date || value instanceof RegExp || 
+      value instanceof Map || value instanceof Set) {
+    return false
+  }
+  
+  // Check for plain objects (created via {} or new Object())
+  // Exclude special objects by checking their constructor
+  const proto = Object.getPrototypeOf(value)
+  if (proto === null || proto === Object.prototype) {
+    return true
+  }
+  
+  // Exclude class instances and other special objects
+  return false
+}
+
+/**
  * Build a deep readonly proxy for nested state objects and arrays.
  * This provides runtime mutation protection at all nesting levels.
  * 
  * IMPORTANT: This is for mutation protection ONLY. No reactive dependency
  * tracking occurs at nested levels — only top-level field tracking is used.
+ * 
+ * v0.1 Supported types: primitives, plain objects, arrays
+ * Other types (Date, RegExp, Map, Set, class instances) are returned as-is.
  * 
  * get  — returns value, wrapping objects/arrays recursively
  * set  — throws TypeError (readonly)
@@ -173,10 +209,15 @@ function makeDeepReadonlyProxy(
   if (Array.isArray(raw)) {
     const arrayProxy = new Proxy(raw, {
       get(target, prop, receiver) {
+        // Block prototype chain access
+        if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+          return undefined
+        }
+        
         const value = Reflect.get(target, prop, receiver)
         
         // Recursively wrap array elements
-        if (typeof value === 'object' && value !== null) {
+        if (isPlainObjectOrArray(value)) {
           return makeDeepReadonlyProxy(value, proxyCache)
         }
         
@@ -217,6 +258,12 @@ function makeDeepReadonlyProxy(
           `Cannot prevent extensions on readonly array outside of an action.`
         )
       },
+      getPrototypeOf(target) {
+        if (!Object.isExtensible(target)) {
+          return Reflect.getPrototypeOf(target)
+        }
+        return null
+      },
     })
     
     proxyCache.set(raw, arrayProxy)
@@ -226,10 +273,15 @@ function makeDeepReadonlyProxy(
   // Handle plain objects
   const objectProxy = new Proxy(raw as object, {
     get(target, prop, receiver) {
+      // Block prototype chain access
+      if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+        return undefined
+      }
+      
       const value = Reflect.get(target, prop, receiver)
       
       // Recursively wrap nested objects and arrays
-      if (typeof value === 'object' && value !== null) {
+      if (isPlainObjectOrArray(value)) {
         return makeDeepReadonlyProxy(value, proxyCache)
       }
       
@@ -259,6 +311,12 @@ function makeDeepReadonlyProxy(
       throw new TypeError(
         `Cannot prevent extensions on readonly state outside of an action.`
       )
+    },
+    getPrototypeOf(target) {
+      if (!Object.isExtensible(target)) {
+        return Reflect.getPrototypeOf(target)
+      }
+      return null
     },
   })
   
@@ -290,13 +348,18 @@ function makeTrackingReadonlyProxy<S extends StateRecord>(
   
   return new Proxy(raw, {
     get(target, prop, receiver) {
+      // Block prototype chain access
+      if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+        return undefined
+      }
+      
       if (typeof prop === 'string') {
         scope.trackField(`${nodeId}:${prop}`)
       }
       const value = Reflect.get(target, prop, receiver)
       
       // Wrap nested objects and arrays in deep readonly proxies
-      if (typeof value === 'object' && value !== null) {
+      if (isPlainObjectOrArray(value)) {
         return makeDeepReadonlyProxy(value, proxyCache)
       }
       
@@ -327,6 +390,12 @@ function makeTrackingReadonlyProxy<S extends StateRecord>(
       throw new TypeError(
         `Cannot prevent extensions on readonly state outside of an action.`
       )
+    },
+    getPrototypeOf(target) {
+      if (!Object.isExtensible(target)) {
+        return Reflect.getPrototypeOf(target)
+      }
+      return null
     },
   }) as ReadonlyState<S>
 }
@@ -422,6 +491,12 @@ export function createReactiveNode<
   scope: ReactiveScope,
   nodeId: string = nextNodeId()
 ): ReactiveInternalNode<S, A> {
+
+  // -- Validate state shape -------------------------------------------------
+  // Enforce v0.1 state model: only primitives, plain objects, and arrays allowed
+  if (def.state !== undefined) {
+    validateStateRecord(def.state)
+  }
 
   // -- Raw state ------------------------------------------------------------
   const _rawState: S = (def.state !== undefined ? { ...def.state } : {}) as S

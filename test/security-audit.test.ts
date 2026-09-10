@@ -2235,3 +2235,256 @@ describe('F.3.26 — Security Invariant Verification S1-S14', () => {
     home.destroy()
   })
 })
+
+// ===========================================================================
+// F.3.27 — Readonly State Prototype Safety (Plain Node & ReactiveNode)
+// ===========================================================================
+
+describe('F.3.27 — Readonly State Prototype Safety', () => {
+  it('RO-PROT-1: __proto__ property returns undefined on readonly state', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { profile: { name: 'Alice' } } })
+    
+    assert.equal((node.state as unknown as { __proto__: unknown }).__proto__, undefined)
+    assert.equal((node.state.profile as unknown as { __proto__: unknown }).__proto__, undefined)
+    home.destroy()
+  })
+
+  it('RO-PROT-2: constructor property returns undefined on readonly state', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { profile: { name: 'Alice' } } })
+    
+    assert.equal((node.state as unknown as { constructor: unknown }).constructor, undefined)
+    assert.equal((node.state.profile as unknown as { constructor: unknown }).constructor, undefined)
+    home.destroy()
+  })
+
+  it('RO-PROT-3: prototype property returns undefined on readonly state', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { profile: { name: 'Alice' } } })
+    
+    assert.equal((node.state as unknown as { prototype: unknown }).prototype, undefined)
+    assert.equal((node.state.profile as unknown as { prototype: unknown }).prototype, undefined)
+    home.destroy()
+  })
+
+  it('RO-PROT-4: __proto__ blocked on array elements', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { items: [{ name: 'item1' }] } })
+    
+    assert.equal((node.state.items as unknown as { __proto__: unknown }[])[0].__proto__, undefined)
+    home.destroy()
+  })
+
+  it('RO-PROT-5: constructor blocked on array elements', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { items: [{ name: 'item1' }] } })
+    
+    assert.equal((node.state.items as unknown as { constructor: unknown }[])[0].constructor, undefined)
+    home.destroy()
+  })
+
+  it('RO-PROT-6: prototype blocked on array elements', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { items: [{ name: 'item1' }] } })
+    
+    assert.equal((node.state.items as unknown as { prototype: unknown }[])[0].prototype, undefined)
+    home.destroy()
+  })
+
+  it('RO-PROT-7: preventExtensions/freeze/seal interaction with proxy invariants', () => {
+    const home = createReactiveHome()
+    const node = home.node({
+      state: { profile: { name: 'Alice' } },
+      actions: {
+        freezeProfile: (ctx) => {
+          Object.freeze(ctx.state.profile)
+        }
+      }
+    })
+    
+    // Freeze the profile inside an Action
+    node.actions.freezeProfile()
+    
+    // Reading through readonly proxy should still work
+    assert.equal(node.state.profile.name, 'Alice')
+    
+    // getPrototypeOf must return the actual prototype when target is non-extensible
+    // to satisfy JavaScript Proxy invariants. This is a necessary trade-off for
+    // supporting Actions that freeze/seal objects while maintaining correctness.
+    const proto = Object.getPrototypeOf(node.state.profile)
+    assert.equal(proto, Object.prototype, 'getPrototypeOf must return actual prototype when target is frozen')
+    
+    const reflectProto = Reflect.getPrototypeOf(node.state.profile)
+    assert.equal(reflectProto, Object.prototype, 'Reflect.getPrototypeOf must return actual prototype when target is frozen')
+    
+    // However, __proto__, constructor, and prototype properties are still blocked
+    assert.equal((node.state.profile as unknown as { __proto__: unknown }).__proto__, undefined)
+    assert.equal((node.state.profile as unknown as { constructor: unknown }).constructor, undefined)
+    assert.equal((node.state.profile as unknown as { prototype: unknown }).prototype, undefined)
+    
+    home.destroy()
+  })
+})
+
+// ===========================================================================
+// F.3.28 — State Type Model (v0.1)
+// ===========================================================================
+
+describe('F.3.28 — State Type Model v0.1', () => {
+  it('STATE-TYPE-1: primitives accepted', () => {
+    const home = createReactiveHome()
+    const node = home.node({ 
+      state: { 
+        str: 'hello',
+        num: 42,
+        bool: true,
+        nullVal: null,
+        undef: undefined
+      } 
+    })
+    
+    assert.equal(node.state.str, 'hello')
+    assert.equal(node.state.num, 42)
+    assert.equal(node.state.bool, true)
+    assert.equal(node.state.nullVal, null)
+    assert.equal(node.state.undef, undefined)
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-2: plain objects accepted', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { profile: { name: 'Alice', address: { city: 'NYC' } } } })
+    
+    // Reading nested object should return a proxy
+    const profile = node.state.profile
+    assert.equal(profile.name, 'Alice')
+    
+    // Nested mutation should throw
+    assert.throws(() => {
+      (profile as unknown as { name: string }).name = 'Bob'
+    }, TypeError)
+    
+    assert.throws(() => {
+      (profile.address as unknown as { city: string }).city = 'LA'
+    }, TypeError)
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-3: arrays accepted', () => {
+    const home = createReactiveHome()
+    const node = home.node({ state: { items: [{ id: 1 }, { id: 2 }] } })
+    
+    // Reading array should return a proxy
+    const items = node.state.items
+    assert.equal(items.length, 2)
+    
+    // Array mutation should throw
+    assert.throws(() => {
+      items.push({ id: 3 })
+    }, TypeError)
+    
+    // Nested array element mutation should throw
+    assert.throws(() => {
+      (items[0] as unknown as { id: number }).id = 99
+    }, TypeError)
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-4: Date rejected', () => {
+    const home = createReactiveHome()
+    const date = new Date('2024-01-01')
+    
+    assert.throws(() => {
+      home.node({ state: { createdAt: date } })
+    }, TypeError, 'Date is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-5: RegExp rejected', () => {
+    const home = createReactiveHome()
+    const regex = /test/g
+    
+    assert.throws(() => {
+      home.node({ state: { pattern: regex } })
+    }, TypeError, 'RegExp is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-6: Map rejected', () => {
+    const home = createReactiveHome()
+    const map = new Map([['key', 'value']])
+    
+    assert.throws(() => {
+      home.node({ state: { data: map } })
+    }, TypeError, 'Map is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-7: Set rejected', () => {
+    const home = createReactiveHome()
+    const set = new Set([1, 2, 3])
+    
+    assert.throws(() => {
+      home.node({ state: { data: set } })
+    }, TypeError, 'Set is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-8: class instance rejected', () => {
+    class TestClass {
+      constructor(public value: number) {}
+    }
+    
+    const home = createReactiveHome()
+    const instance = new TestClass(42)
+    
+    assert.throws(() => {
+      home.node({ state: { obj: instance } })
+    }, TypeError, 'class instance or special object is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-9: typed array rejected', () => {
+    const home = createReactiveHome()
+    const typedArray = new Int8Array([1, 2, 3])
+    
+    assert.throws(() => {
+      home.node({ state: { data: typedArray } })
+    }, TypeError, 'Int8Array is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-10: nested special object rejected', () => {
+    const home = createReactiveHome()
+    const date = new Date('2024-01-01')
+    
+    assert.throws(() => {
+      home.node({ state: { profile: { createdAt: date } } })
+    }, TypeError, 'Date is not supported')
+    
+    home.destroy()
+  })
+
+  it('STATE-TYPE-11: cyclic valid state accepted', () => {
+    const home = createReactiveHome()
+    const cyclic: Record<string, unknown> = { name: 'Alice' }
+    cyclic.self = cyclic
+    
+    const node = home.node({ state: { profile: cyclic } })
+    
+    assert.equal(node.state.profile.name, 'Alice')
+    assert.strictEqual(node.state.profile.self, node.state.profile)
+    
+    home.destroy()
+  })
+})

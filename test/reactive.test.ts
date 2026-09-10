@@ -556,12 +556,42 @@ describe('Test 14 — Top-level field tracking', () => {
     home.destroy()
   })
 
-  it('DEFERRED NOTE: nested-path tracking (account.balance) is not yet tracked', () => {
+  it('DEFERRED NOTE: nested-path tracking (account.balance) is not yet tracked', async () => {
     // Phase B tracks top-level keys only.
     // Reading node.state.profile.name registers dep on "profile", not "profile.name".
-    // Mutating profile.name directly (without replacing profile) does not notify.
-    // This is explicitly documented as a DEFERRED FINDING.
-    // No assertion needed - this is a documentation placeholder for deferred work.
+    // Mutating profile.name directly (without replacing profile) does NOT trigger subscriber
+    // because Phase B only notifies when the field reference changes, not when nested contents change.
+    // This is a documented limitation for v0.1.
+    
+    const home = createReactiveHome()
+    const node = home.node({
+      state: { profile: { name: 'Alice' } },
+      actions: {
+        setName: (ctx, name: string) => {
+          ctx.state.profile.name = name
+        }
+      }
+    })
+    
+    let profileRuns = 0
+    home.subscribe(() => {
+      profileRuns++
+      void node.state.profile.name
+    })
+    
+    // Initial read triggers subscriber
+    await home.flush()
+    assert.equal(profileRuns, 1)
+    
+    // CURRENT BEHAVIOR: Mutating nested property does NOT trigger subscriber
+    // because Phase B tracks dependencies at the field level ("profile")
+    // and only notifies when the profile object reference changes.
+    // This will be improved in future work to support selective nested path tracking.
+    node.actions.setName('Bob')
+    await home.flush()
+    assert.equal(profileRuns, 1)
+    
+    home.destroy()
   })
 })
 
