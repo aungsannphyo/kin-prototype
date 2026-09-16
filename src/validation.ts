@@ -126,6 +126,14 @@ export function validateStateValue(
   path: string = '',
   visited: WeakSet<object> = new WeakSet<object>()
 ): void {
+  // Reject functions early since typeof function !== 'object'
+  if (typeof value === 'function') {
+    throw new TypeError(
+      `Invalid state at path "${path}": functions are not supported in v0.1 state model. ` +
+      `Only primitives, plain objects, and arrays are allowed.`
+    )
+  }
+
   // Primitives are always valid
   if (value === null || typeof value !== 'object') {
     return
@@ -153,13 +161,6 @@ export function validateStateValue(
     )
   }
 
-  // Reject functions
-  if (typeof value === 'function') {
-    throw new TypeError(
-      `Invalid state at path "${path}": functions are not supported in v0.1 state model. ` +
-      `Only primitives, plain objects, and arrays are allowed.`
-    )
-  }
 
   // Check for plain objects by prototype chain
   const proto = Object.getPrototypeOf(value)

@@ -478,6 +478,50 @@ function makeMutatingProxy<S extends StateRecord>(
   }) as S
 }
 
+/**
+ * Deep clones state objects to ensure the Node owns its internal state.
+ * Preserves cyclic references and duplicate references.
+ * Only clones arrays and plain objects; other values are returned as-is.
+ */
+function deepCloneState(value: unknown, visited: Map<object, object> = new Map()): any {
+  if (value === null || typeof value !== 'object') {
+    return value
+  }
+
+  if (visited.has(value)) {
+    return visited.get(value)
+  }
+
+  if (Array.isArray(value)) {
+    const clone: any[] = []
+    visited.set(value, clone)
+    for (const item of value) {
+      clone.push(deepCloneState(item, visited))
+    }
+    return clone
+  }
+
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== null && proto !== Object.prototype) {
+    return value
+  }
+
+  const clone: Record<string | symbol, any> = {}
+  visited.set(value, clone)
+  
+  for (const key of Reflect.ownKeys(value)) {
+    const desc = Object.getOwnPropertyDescriptor(value, key)
+    if (desc) {
+      if ('value' in desc) {
+        desc.value = deepCloneState(desc.value, visited)
+      }
+      Object.defineProperty(clone, key, desc)
+    }
+  }
+  
+  return clone
+}
+
 // ---------------------------------------------------------------------------
 // createReactiveNode
 // ---------------------------------------------------------------------------
@@ -499,7 +543,7 @@ export function createReactiveNode<
   }
 
   // -- Raw state ------------------------------------------------------------
-  const _rawState: S = (def.state !== undefined ? { ...def.state } : {}) as S
+  const _rawState: S = (def.state !== undefined ? deepCloneState(def.state) : {}) as S
 
   // -- Proxies --------------------------------------------------------------
   const _trackingProxy = makeTrackingReadonlyProxy(_rawState, nodeId, scope)
