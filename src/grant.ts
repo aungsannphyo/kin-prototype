@@ -32,7 +32,7 @@ import { HOME_OWNER_TAG } from './types.js'
 // Helper: Get the root Home for a node
 // ---------------------------------------------------------------------------
 
-function getNodeHome(node: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): unknown {
+export function getNodeHome(node: ReactiveNode<StateRecord, ActionsMap<StateRecord>>): unknown {
   let currentOwner = (node as any)[REACTIVE_NODE_INTERNAL]._owner
   while (currentOwner) {
     if ('_tag' in currentOwner && currentOwner._tag === HOME_OWNER_TAG) {

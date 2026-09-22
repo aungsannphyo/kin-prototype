@@ -31,9 +31,9 @@ import {
 import { createReactiveScope } from './reactive.js'
 import type { Subscriber } from './reactive.js'
 import { HOME_OWNER_TAG } from './types.js'
-import { createGrantStore } from './grant.js'
-import { validateGrant, createAuthorizedView, linkSubscriberToGrant } from './authorization.js'
-import { GRANT_INTERNAL, type GrantInternal, type Grant, type Relationship, type AuthorizedView } from './relationship.js'
+import { createGrantStore, getNodeHome } from './grant.js'
+import { validateGrant, linkSubscriberToGrant } from './authorization.js'
+import { type Grant, type Relationship, type AuthorizedView } from './relationship.js'
 
 export function createReactiveHome(): ReactiveHome {
   const scope = createReactiveScope()
@@ -104,9 +104,8 @@ export function createReactiveHome(): ReactiveHome {
         grant
       )
 
-      // Step 2: Build the capability-filtered view using the Grant's read snapshot.
-      const readSnapshot = (grant as GrantInternal)[GRANT_INTERNAL].readSnapshot
-      const view = createAuthorizedView<S>(target, readSnapshot)
+      // Step 2: Build the capability-filtered view using the Grant.
+      const view = grant.view<S>()
 
       // Step 3: Create the subscriber using existing Phase B machinery.
       // The callback receives only the AuthorizedView — never the raw target.
@@ -118,6 +117,33 @@ export function createReactiveHome(): ReactiveHome {
       })
 
       return sub
+    },
+
+    authorizedView<S extends StateRecord = StateRecord>(
+      source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+      target: ReactiveNode<S, ActionsMap<S>>,
+      grant: Grant
+    ): AuthorizedView<S> {
+      if (_destroyed) {
+        throw new Error('Cannot access AuthorizedView on a destroyed Home.')
+      }
+
+      // Validate cross-Home isolation
+      const sourceHome = getNodeHome(source)
+      const targetHome = getNodeHome(target as ReactiveNode<StateRecord, ActionsMap<StateRecord>>)
+
+      if (sourceHome === null || targetHome === null || sourceHome !== ownerToken || targetHome !== ownerToken) {
+        throw new Error('Cross-Home authorizedView access is not supported. Nodes must belong to this Home.')
+      }
+
+      // Validate grant against source and target
+      validateGrant(
+        source,
+        target as ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+        grant
+      )
+
+      return grant.view<S>()
     },
 
     destroy(): void {

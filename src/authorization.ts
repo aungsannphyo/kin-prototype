@@ -180,7 +180,8 @@ function _deriveSubSnapshot(
 
 function _createNestedProxy(
   rawObj: unknown,
-  subSnapshot: ReadonlySet<string>
+  subSnapshot: ReadonlySet<string>,
+  grant?: Grant
 ): object {
   // If the raw value is not an object (e.g. a primitive reached via a subtree grant),
   // just return it — nothing to proxy. This handles the edge case of
@@ -195,6 +196,19 @@ function _createNestedProxy(
 
   const proxy = new Proxy(rawObj as Record<string | symbol, unknown>, {
     get(target, prop) {
+      if (grant?.isRevoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cross-node access denied: the Grant has been revoked.'
+        )
+      }
+      if (grant?.relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cross-node access denied: the Grant\'s Relationship has been destroyed.'
+        )
+      }
+
       // Symbol-keyed access: pass through silently (no authorization needed).
       if (typeof prop !== 'string') {
         return target[prop]
@@ -221,7 +235,7 @@ function _createNestedProxy(
       // match === 'allow-proxy': return a cached nested proxy
       if (_cache.has(prop)) return _cache.get(prop)
       const nestedSub = _deriveSubSnapshot(subSnapshot, prop)
-      const nested = _createNestedProxy(target[prop], nestedSub)
+      const nested = _createNestedProxy(target[prop], nestedSub, grant)
       _cache.set(prop, nested)
       return nested
     },
@@ -243,12 +257,37 @@ function _createNestedProxy(
     },
 
     ownKeys(_target) {
+      if (grant?.isRevoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cross-node access denied: the Grant has been revoked.'
+        )
+      }
+      if (grant?.relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cross-node access denied: the Grant\'s Relationship has been destroyed.'
+        )
+      }
       // Return only authorized field names from subSnapshot
       // This prevents Object.keys() from leaking unauthorized fields
       return [...subSnapshot]
     },
 
     getOwnPropertyDescriptor(_target, prop) {
+      if (grant?.isRevoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cross-node access denied: the Grant has been revoked.'
+        )
+      }
+      if (grant?.relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cross-node access denied: the Grant\'s Relationship has been destroyed.'
+        )
+      }
+
       // Symbol-keyed access: pass through silently.
       if (typeof prop !== 'string') {
         return Reflect.getOwnPropertyDescriptor(_target, prop)
@@ -307,7 +346,8 @@ function _createNestedProxy(
 
 export function createAuthorizedView<S extends StateRecord>(
   target: ReactiveNode<S, ActionsMap<S>>,
-  readSnapshot: ReadonlySet<string>
+  readSnapshot: ReadonlySet<string>,
+  grant?: Grant
 ): AuthorizedView<S> {
 
   // Per-view top-level proxy cache, keyed by field name.
@@ -321,6 +361,19 @@ export function createAuthorizedView<S extends StateRecord>(
 
   const filteredState = new Proxy(target.state as object, {
     get(_stateProxy, prop) {
+      if (grant?.isRevoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cross-node access denied: the Grant has been revoked.'
+        )
+      }
+      if (grant?.relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cross-node access denied: the Grant\'s Relationship has been destroyed.'
+        )
+      }
+
       // Symbol-keyed access: pass through silently.
       if (typeof prop !== 'string') {
         return (target.state as Record<symbol, unknown>)[prop as symbol]
@@ -365,7 +418,7 @@ export function createAuthorizedView<S extends StateRecord>(
       }
 
       const subSnapshot = _deriveSubSnapshot(readSnapshot, prop)
-      const nested = _createNestedProxy(rawValue, subSnapshot)
+      const nested = _createNestedProxy(rawValue, subSnapshot, grant)
       _topCache.set(prop, nested)
       _topCacheRaw.set(prop, rawValue)
       return nested
@@ -388,12 +441,37 @@ export function createAuthorizedView<S extends StateRecord>(
     },
 
     ownKeys(_target) {
+      if (grant?.isRevoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cross-node access denied: the Grant has been revoked.'
+        )
+      }
+      if (grant?.relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cross-node access denied: the Grant\'s Relationship has been destroyed.'
+        )
+      }
       // Return only authorized field names from readSnapshot
       // This prevents Object.keys() from leaking unauthorized fields
       return [...readSnapshot]
     },
 
     getOwnPropertyDescriptor(_target, prop) {
+      if (grant?.isRevoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cross-node access denied: the Grant has been revoked.'
+        )
+      }
+      if (grant?.relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cross-node access denied: the Grant\'s Relationship has been destroyed.'
+        )
+      }
+
       // Symbol-keyed access: pass through silently.
       if (typeof prop !== 'string') {
         return Reflect.getOwnPropertyDescriptor(_target, prop)

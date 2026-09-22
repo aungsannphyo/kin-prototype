@@ -47,6 +47,15 @@
 export const EVENT_HANDLER_BRAND: unique symbol = Symbol('EventHandler')
 
 // ---------------------------------------------------------------------------
+// Child node brand
+//
+// A Symbol used to authoritatively identify ChildNode descriptors created
+// by Kin's view factories (element, text, fragment, when, each).
+// ---------------------------------------------------------------------------
+
+export const CHILD_NODE_BRAND: unique symbol = Symbol('ChildNode')
+
+// ---------------------------------------------------------------------------
 // PropValue
 //
 // The set of values that may appear as element prop values.
@@ -91,6 +100,7 @@ export type ChildNode =
   | TextNode
   | FragmentNode
   | ConditionalNode
+  | EachNode<any>
 
 // ---------------------------------------------------------------------------
 // ElementNode
@@ -105,6 +115,7 @@ export type ChildNode =
  * `children` — ordered child descriptors; readonly to prevent external mutation
  */
 export interface ElementNode {
+  readonly [CHILD_NODE_BRAND]: true
   readonly type: 'element'
   readonly tag: string
   readonly props: Readonly<Record<string, PropValue>>
@@ -125,6 +136,7 @@ export interface ElementNode {
  * NOTE: the getter is stored as-is at this stage — no subscription is created.
  */
 export interface TextNode {
+  readonly [CHILD_NODE_BRAND]: true
   readonly type: 'text'
   readonly value: string | ReactiveGetter
 }
@@ -138,6 +150,7 @@ export interface TextNode {
  * Used to return multiple sibling nodes from a single expression.
  */
 export interface FragmentNode {
+  readonly [CHILD_NODE_BRAND]: true
   readonly type: 'fragment'
   readonly children: readonly ChildNode[]
 }
@@ -150,15 +163,45 @@ export interface FragmentNode {
  * Represents a condition-based branch in the view tree.
  *
  * `when`      — zero-arg predicate; evaluated by the renderer to pick a branch
- * `then`      — descriptor to render when the condition is truthy
- * `otherwise` — optional descriptor when falsy (renders nothing if absent)
+ * `consequent` — descriptor to render when the condition is truthy
+ * `otherwise`  — optional descriptor when falsy (renders nothing if absent)
  *
  * The condition function is stored but NOT subscribed to in Phase E.1.
  * The DOM renderer (Phase E.2+) will subscribe and mount/unmount branches.
+ *
+ * NOTE: Do NOT add a `then` field here. Any object with a `then` method is
+ * treated as a "thenable" by the JS Promise spec, causing unexpected
+ * async unwrapping when passed through Promise chains or `await`.
  */
 export interface ConditionalNode {
+  readonly [CHILD_NODE_BRAND]: true
   readonly type: 'conditional'
   readonly when: () => boolean
-  readonly then: ChildNode
+  readonly consequent: ChildNode
   readonly otherwise?: ChildNode
+}
+
+// ---------------------------------------------------------------------------
+// EachNode — Phase G.1 Dynamic Keyed List
+// ---------------------------------------------------------------------------
+
+/** Function that derives a stable unique key for a collection item. */
+export type KeyExtractor<T> = (item: T, index: number) => string | number
+
+/** Function that renders an item descriptor. `index` is a reactive getter returning current item index. */
+export type ItemRenderer<T> = (item: T, index: () => number) => ChildNode
+
+/**
+ * Represents a dynamic keyed list in the view tree.
+ *
+ * `collection` — reactive getter returning an iterable or readonly array of items
+ * `key`        — key extraction function mapping an item and index to a stable key
+ * `render`     — factory producing a ChildNode descriptor for each item
+ */
+export interface EachNode<T = unknown> {
+  readonly [CHILD_NODE_BRAND]: true
+  readonly type: 'each'
+  readonly collection: () => Iterable<T> | readonly T[]
+  readonly key: KeyExtractor<T>
+  readonly render: ItemRenderer<T>
 }

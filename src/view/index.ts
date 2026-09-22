@@ -37,8 +37,10 @@ export {
   text,
   fragment,
   when,
+  each,
   handler,
   isEventHandler,
+  isChildNode,
 } from './factory.js'
 
 // ---------------------------------------------------------------------------
@@ -51,14 +53,16 @@ export type {
   TextNode,
   FragmentNode,
   ConditionalNode,
+  EachNode,
+  KeyExtractor,
+  ItemRenderer,
   PropValue,
   ReactiveGetter,
   EventHandler,
 } from './types.js'
 
 // ---------------------------------------------------------------------------
-// EVENT_HANDLER_BRAND — exported so renderers can import and use it directly
-// as an alternative to isEventHandler() when they need the symbol itself.
+// Brands — exported so renderers can import and use them directly
 // ---------------------------------------------------------------------------
 
-export { EVENT_HANDLER_BRAND } from './types.js'
+export { EVENT_HANDLER_BRAND, CHILD_NODE_BRAND } from './types.js'

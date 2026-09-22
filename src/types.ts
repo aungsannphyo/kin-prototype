@@ -286,6 +286,24 @@ export interface ReactiveHome {
   ): Subscriber
 
   /**
+   * Synchronously obtain an AuthorizedView for a target node using a Grant.
+   *
+   * Validates that the Grant belongs to the source -> target Relationship,
+   * that the Grant is not revoked, that the Relationship is not destroyed,
+   * and that both nodes belong to this Home.
+   *
+   * @throws KinAuthError('GRANT_REVOKED') if the grant is revoked.
+   * @throws KinAuthError('RELATIONSHIP_DESTROYED') if the relationship is gone.
+   * @throws KinAuthError('GRANT_MISMATCH') if the grant belongs to a different pair.
+   * @throws Error if nodes belong to different Homes or Home is destroyed.
+   */
+  authorizedView<S extends StateRecord = StateRecord>(
+    source: ReactiveNode<StateRecord, ActionsMap<StateRecord>>,
+    target: ReactiveNode<S, ActionsMap<S>>,
+    grant: Grant
+  ): AuthorizedView<S>
+
+  /**
    * Destroy Home and all root nodes (and their subscriptions).
    * Phase C: also destroys all Relationships and Grants.
    */

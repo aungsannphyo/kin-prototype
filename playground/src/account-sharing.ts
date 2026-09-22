@@ -138,16 +138,9 @@ export function createAccountSharingApp(
     capability(['profile.name', 'profile.email']),
   )
 
-  let activeAuthorizedView: AuthorizedView<AliceState> | null = null
-
-  // Helper to attach Bob's subscription to a Grant
-  function subscribeBob(grant: Grant): void {
-    home.subscribeAs(bob, alice, grant, (view) => {
-      activeAuthorizedView = view
-    })
-  }
-
-  subscribeBob(activeGrant)
+  // Synchronously acquire Bob's AuthorizedView directly from the Grant
+  let activeAuthorizedView: AuthorizedView<AliceState> | null =
+    activeGrant.view<AliceState>()
 
   // Security audit helper: tries all attack vectors against Bob's AuthorizedView
   function runSecurityAudit(): SecurityAuditResult {
@@ -524,7 +517,7 @@ export function createAccountSharingApp(
       activeGrant = relationship.grant(
         capability(['profile.name', 'profile.email']),
       )
-      subscribeBob(activeGrant)
+      activeAuthorizedView = activeGrant.view<AliceState>()
       bob.actions.setRevoked(false)
       return activeGrant
     },

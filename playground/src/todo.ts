@@ -14,12 +14,12 @@ import {
   element,
   text,
   when,
+  each,
   handler,
   mount,
   type ReactiveHome,
   type ReactiveNode,
   type ChildNode,
-  type MountHandle,
 } from 'kin-prototype'
 
 // ---------------------------------------------------------------------------
@@ -59,6 +59,17 @@ export function createTodoNode(
   home: ReactiveHome,
   initialTodos: Todo[] = [],
 ): ReactiveNode<TodoState, TodoActions> {
+  // Ensure _nextId does not collide with manually provided initial todo ids
+  for (const t of initialTodos) {
+    const match = /^t-(\d+)$/.exec(t.id)
+    if (match && match[1]) {
+      const num = parseInt(match[1], 10)
+      if (num >= _nextId) {
+        _nextId = num + 1
+      }
+    }
+  }
+
   return home.node<TodoState, TodoActions>({
     state: { todos: initialTodos },
     actions: {
@@ -212,16 +223,21 @@ export function TodoAppShellView(
       ),
     ),
 
-    // Todo list container (items dynamically mounted into here)
-    element('ul', { class: 'todo-list', id: 'todo-list' }),
+    // Todo list rendered declaratively using Kin's each() primitive
+    element(
+      'ul',
+      { class: 'todo-list', id: 'todo-list' },
+      each(
+        () => node.state.todos,
+        (todo) => todo.id,
+        (todo) => TodoItemView(node, todo.id),
+      ),
+    ),
   )
 }
 
 // ---------------------------------------------------------------------------
-// 4. Mount & List Synchronization Driver
-//
-// Bridges Kin's reactive runtime to dynamic list management without
-// introducing a VDOM or framework component runtime.
+// 4. Mount Driver (Pure Kin mount() lifecycle)
 // ---------------------------------------------------------------------------
 
 export type TodoAppHandle = {
@@ -249,61 +265,11 @@ export function mountTodoApp(
     }
   }
 
-  // 1. Mount the app shell into container
+  // Mount the app view directly using Kin's declarative renderer
   const shellView = TodoAppShellView(node, handleAdd)
   const shellHandle = mount(home, shellView, container)
 
   const listContainer = container.querySelector('#todo-list') as HTMLUListElement | null
-  if (!listContainer) {
-    throw new Error('Missing #todo-list container after shell mount')
-  }
-
-  // 2. Track mounted item handles to preserve DOM identity and manage lifecycle
-  type MountedItem = {
-    id: string
-    handle: MountHandle
-    element: HTMLLIElement
-  }
-  const mountedItems = new Map<string, MountedItem>()
-
-  // 3. Fine-grained list sync subscriber
-  // Only runs when node.state.todos array reference changes (add or remove)
-  const listSubscriber = home.subscribe(() => {
-    const todos = node.state.todos
-    const activeIds = new Set(todos.map((t) => t.id))
-
-    // Step A: Dispose removed items (calls handle.unmount() -> cleans up subscriptions, listeners, DOM)
-    for (const [id, item] of mountedItems.entries()) {
-      if (!activeIds.has(id)) {
-        item.handle.unmount()
-        mountedItems.delete(id)
-      }
-    }
-
-    // Step B: Mount new items, preserve existing items & DOM identity
-    for (let i = 0; i < todos.length; i++) {
-      const todo = todos[i]
-      let item = mountedItems.get(todo.id)
-
-      if (!item) {
-        // Mount single new item view directly into listContainer
-        const itemDescriptor = TodoItemView(node, todo.id)
-        const itemHandle = mount(home, itemDescriptor, listContainer)
-        const liElement = listContainer.lastElementChild as HTMLLIElement
-        item = {
-          id: todo.id,
-          handle: itemHandle,
-          element: liElement,
-        }
-        mountedItems.set(todo.id, item)
-      }
-
-      // Ensure correct DOM order without replacing nodes
-      if (listContainer.children[i] !== item.element) {
-        listContainer.insertBefore(item.element, listContainer.children[i] || null)
-      }
-    }
-  })
 
   let unmounted = false
 
@@ -314,17 +280,6 @@ export function mountTodoApp(
     unmount() {
       if (unmounted) return
       unmounted = true
-
-      // Unsubscribe the list synchronization subscriber
-      home.unsubscribe(listSubscriber)
-
-      // Unmount all individual item handles (disposes their subscriptions & listeners)
-      for (const item of mountedItems.values()) {
-        item.handle.unmount()
-      }
-      mountedItems.clear()
-
-      // Unmount the shell (cleans up shell subscriptions & DOM nodes)
       shellHandle.unmount()
     },
   }

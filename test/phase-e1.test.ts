@@ -253,11 +253,11 @@ describe('E1-9 — when(): condition function preserved', () => {
   })
 })
 
-describe('E1-10 — when(): then branch preserved', () => {
-  it('then descriptor is stored as-is', () => {
+describe('E1-10 — when(): consequent branch preserved', () => {
+  it('consequent descriptor is stored as-is', () => {
     const thenNode = text('visible')
     const node = when(() => true, thenNode)
-    assert.equal(node.then, thenNode)
+    assert.equal(node.consequent, thenNode)
   })
 })
 
@@ -390,14 +390,14 @@ describe('E1-16 — Composition: nested structure preserved', () => {
     assert.equal(worldNode.value, 'World')
   })
 
-  it('when node can hold an element as its then branch', () => {
+  it('when node can hold an element as its consequent branch', () => {
     const thenEl = element('span', {}, text('active'))
     const cond = when(() => true, thenEl)
     const root = element('div', {}, cond)
 
     const condNode = root.children[0] as ConditionalNode
     assert.equal(condNode.type, 'conditional')
-    const thenNode = condNode.then as ElementNode
+    const thenNode = condNode.consequent as ElementNode
     assert.equal(thenNode.tag, 'span')
   })
 })

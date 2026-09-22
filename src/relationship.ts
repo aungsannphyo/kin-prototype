@@ -30,6 +30,7 @@
 import type { ReactiveNode, ReactiveInternalNode } from './reactive-node.js'
 import { REACTIVE_NODE_INTERNAL } from './reactive-node.js'
 import type { StateRecord, ActionsMap, ReadonlyState } from './types.js'
+import { createAuthorizedView } from './authorization.js'
 
 // ---------------------------------------------------------------------------
 // ID generators
@@ -206,6 +207,14 @@ export interface Grant {
   readonly isRevoked: boolean
 
   /**
+   * Synchronously obtain an AuthorizedView for the target node.
+   *
+   * @throws KinAuthError('GRANT_REVOKED') if this grant has been revoked.
+   * @throws KinAuthError('RELATIONSHIP_DESTROYED') if the parent relationship has been destroyed.
+   */
+  view<S extends StateRecord = StateRecord>(): AuthorizedView<S>
+
+  /**
    * Revoke this Grant.
    *
    * Effects:
@@ -315,6 +324,26 @@ function _createGrant(
     get relationship() { return relationship },
     get capability()   { return cap },
     get isRevoked()    { return _revoked },
+
+    view<S extends StateRecord = StateRecord>(): AuthorizedView<S> {
+      if (_revoked) {
+        throw new KinAuthError(
+          'GRANT_REVOKED',
+          'Cannot obtain AuthorizedView: Grant has been revoked.'
+        )
+      }
+      if (relationship.isDestroyed) {
+        throw new KinAuthError(
+          'RELATIONSHIP_DESTROYED',
+          'Cannot obtain AuthorizedView: Relationship has been destroyed.'
+        )
+      }
+      return createAuthorizedView<S>(
+        relationship.target as ReactiveNode<S, ActionsMap<S>>,
+        _readSnapshot,
+        grantRef
+      )
+    },
 
     revoke(): void {
       if (_revoked) return

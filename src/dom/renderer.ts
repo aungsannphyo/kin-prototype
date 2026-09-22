@@ -18,6 +18,7 @@ import type {
   TextNode,
   FragmentNode,
   ConditionalNode,
+  EachNode,
   ReactiveGetter,
   EventHandler,
 } from '../view/types.js'
@@ -111,6 +112,8 @@ function materialize(
       return mountFragment(desc, home, rec)
     case 'conditional':
       return mountConditional(desc, home, rec)
+    case 'each':
+      return mountEach(desc, home, rec)
   }
 }
 
@@ -214,7 +217,7 @@ function mountConditional(
       branchRec = null
     }
 
-    const branch = next ? desc.then : desc.otherwise
+    const branch = next ? desc.consequent : desc.otherwise
     if (branch === undefined) {
       if (first) initialNodes = []
       return
@@ -252,6 +255,153 @@ function insertAfter(anchor: globalThis.Node, nodes: globalThis.Node[]): void {
     }
     ref = node
   }
+}
+
+// ---------------------------------------------------------------------------
+// mountEach — Phase G.1 Dynamic Keyed List
+// ---------------------------------------------------------------------------
+
+type EachItemRecord = {
+  readonly key: string | number
+  item: unknown
+  index: number
+  readonly getIndex: () => number
+  readonly rec: RenderRecord
+  readonly nodes: globalThis.Node[]
+}
+
+function mountEach(
+  desc: EachNode,
+  home: ReactiveHome,
+  rec: RenderRecord,
+): globalThis.Node[] {
+  const startAnchor = document.createComment('kin-each')
+  const endMarker = document.createComment('/kin-each')
+  rec.nodes.push(startAnchor, endMarker)
+
+  const currentMap = new Map<string | number, EachItemRecord>()
+  let isFirstRun = true
+  let initialNodes: globalThis.Node[] = []
+
+  const sub = home.subscribe(() => {
+    if (rec.disposed) return
+
+    const raw = desc.collection()
+    const items = raw != null ? Array.from(raw) : []
+
+    // 1. Validate keys and detect duplicates
+    const nextKeys: (string | number)[] = []
+    const seenKeys = new Set<string | number>()
+    for (let i = 0; i < items.length; i++) {
+      const key = desc.key(items[i], i)
+      if (seenKeys.has(key)) {
+        throw new Error(`Duplicate key "${String(key)}" detected in each()`)
+      }
+      seenKeys.add(key)
+      nextKeys.push(key)
+    }
+
+    // 2. Remove items no longer in collection
+    const nextKeySet = new Set(nextKeys)
+    for (const [key, itemRec] of currentMap.entries()) {
+      if (!nextKeySet.has(key)) {
+        disposeRecord(home, itemRec.rec)
+        const idx = rec.children.indexOf(itemRec.rec)
+        if (idx >= 0) rec.children.splice(idx, 1)
+        currentMap.delete(key)
+      }
+    }
+
+    // 3. Initial Mount: populate initialNodes for parent attachment
+    if (isFirstRun) {
+      isFirstRun = false
+      initialNodes = []
+      for (let i = 0; i < items.length; i++) {
+        const key = nextKeys[i]
+        const item = items[i]
+        let currentIndex = i
+        const getIndex = () => currentIndex
+
+        const itemRecRecord = emptyRecord()
+        rec.children.push(itemRecRecord)
+
+        const vNode = desc.render(item, getIndex)
+        const nodes = materialize(vNode, home, itemRecRecord)
+
+        const itemRec: EachItemRecord = {
+          key,
+          item,
+          index: currentIndex,
+          getIndex,
+          rec: itemRecRecord,
+          nodes,
+        }
+        currentMap.set(key, itemRec)
+        for (const n of nodes) {
+          initialNodes.push(n)
+        }
+      }
+      return
+    }
+
+    // 4. Reactive Updates: Reconcile and preserve DOM identity
+    const parent = endMarker.parentNode
+    if (!parent) return
+
+    let refNode: globalThis.Node = endMarker
+
+    for (let i = items.length - 1; i >= 0; i--) {
+      const key = nextKeys[i]
+      const item = items[i]
+      let itemRec = currentMap.get(key)
+
+      if (!itemRec) {
+        // Newly inserted item
+        let currentIndex = i
+        const getIndex = () => currentIndex
+        const itemRecRecord = emptyRecord()
+        rec.children.push(itemRecRecord)
+
+        const vNode = desc.render(item, getIndex)
+        const nodes = materialize(vNode, home, itemRecRecord)
+
+        itemRec = {
+          key,
+          item,
+          index: currentIndex,
+          getIndex,
+          rec: itemRecRecord,
+          nodes,
+        }
+        currentMap.set(key, itemRec)
+
+        for (const n of nodes) {
+          parent.insertBefore(n, refNode)
+        }
+      } else {
+        // Existing item: update index and position if needed
+        itemRec.item = item
+        itemRec.index = i
+
+        const lastNode = itemRec.nodes[itemRec.nodes.length - 1]
+        const isInPlace = lastNode !== undefined && lastNode.nextSibling === refNode
+
+        if (!isInPlace && itemRec.nodes.length > 0) {
+          for (const n of itemRec.nodes) {
+            parent.insertBefore(n, refNode)
+          }
+        }
+      }
+
+      if (itemRec.nodes.length > 0) {
+        refNode = itemRec.nodes[0]
+      }
+    }
+  })
+
+  rec.subscriptions.push(sub)
+
+  return [startAnchor, ...initialNodes, endMarker]
 }
 
 // ---------------------------------------------------------------------------
