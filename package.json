@@ -22,7 +22,10 @@
     "test": "node --import tsx/esm --test test/**/*.test.ts",
     "bench": "node --import tsx/esm benchmark/bench.ts",
     "demo": "node --import tsx/esm demo/account-sharing.ts",
-    "browser-demo": "node --import tsx/esm demo/browser-app.ts"
+    "browser-demo": "node --import tsx/esm demo/browser-app.ts",
+    "playground:dev": "vite --config vite.config.ts",
+    "playground:build": "vite build --config vite.config.ts",
+    "playground:typecheck": "tsc --noEmit --project playground/tsconfig.json"
   },
   "keywords": [
     "kin",
@@ -43,6 +46,7 @@
     "@types/node": "^22.20.1",
     "happy-dom": "^20.14.0",
     "tsx": "4.19.1",
-    "typescript": "5.5.4"
+    "typescript": "5.5.4",
+    "vite": "^8.3.0"
   }
 }
