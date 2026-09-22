@@ -28,11 +28,11 @@ import {
   handler,
   mount,
   isChildNode,
-  CHILD_NODE_BRAND,
   type ElementNode,
   type TextNode,
   type FragmentNode,
 } from '../src/index.js'
+import { CHILD_NODE_BRAND } from '../src/view/index.js'
 
 describe('element() API optional props & overloads', () => {
   let windowRef: Window

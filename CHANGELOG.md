@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project will be documented in this file.
 
@@ -31,12 +31,15 @@ It is intended for internal review and early adopter feedback only.
 
 | Export | Description |
 |---|---|
-| `element(tag, props, ...children)` | Create an ElementNode descriptor. |
+| `element(tag, props?, ...children)` | Create an ElementNode descriptor (props optional). |
 | `text(value)` | Create a TextNode descriptor (static or reactive getter). |
 | `fragment(...children)` | Group children without a wrapping DOM element. |
-| `when(condition, then, otherwise?)` | Conditional branch descriptor. |
+| `when(condition, consequent, otherwise?)` | Conditional branch descriptor. |
+| `each(collection, key, render)` | Keyed dynamic list descriptor. |
 | `handler(fn)` | Wrap a callback as a branded EventHandler. |
 | `mount(home, view, container)` | Render a descriptor tree into a DOM container. Returns `MountHandle`. |
+| `isEventHandler(value)` | Advanced utility: runtime type guard for EventHandlers. |
+| `isChildNode(value)` | Advanced utility: runtime type guard for ChildNode descriptors. |
 
 ---
 
@@ -79,6 +82,12 @@ It is intended for internal review and early adopter feedback only.
 - State model enforcement: only primitives, plain objects, and arrays accepted
 - Proxy invariant fixes for frozen/sealed/non-extensible targets
 - Prototype pollution blocked (`__proto__`, `constructor`, `prototype` return `undefined`)
+
+#### Phase G — Framework Usability & API Freeze
+- Keyed dynamic list primitive: `each(collection, key, render)` with targeted DOM reconciliation and DOM identity retention
+- Synchronous AuthorizedView access: `grant.view()` and `home.authorizedView(source, target, grant)`
+- Optional props in `element(tag, ...children)`
+- Public API freeze: internal branding symbols (`EVENT_HANDLER_BRAND`, `CHILD_NODE_BRAND`) kept module-private to `src/view/`
 
 ---
 

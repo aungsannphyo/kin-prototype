@@ -2,7 +2,7 @@
 
 A minimal frontend UI framework built from scratch around a **family/relationship mental model**.
 
-This repository is an active prototype. Phases A, B, C, D, and E are complete.
+This repository is an active prototype. Phases A, B, C, D, E, F, and G are complete.
 
 ---
 
@@ -339,19 +339,43 @@ DOM
 
 Immutable, platform-independent descriptor types:
 
-| Type              | Description                                                                       |
-| ----------------- | --------------------------------------------------------------------------------- |
-| `ChildNode`       | Discriminated union: `ElementNode \| TextNode \| FragmentNode \| ConditionalNode` |
-| `ElementNode`     | HTML/XML element with tag, props, children                                        |
-| `TextNode`        | Text content (static string or reactive getter)                                   |
-| `FragmentNode`    | Grouping node without DOM element                                                 |
-| `ConditionalNode` | Condition-based branch (`when()`)                                                 |
+| Type              | Description                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `ChildNode`       | Discriminated union: `ElementNode \| TextNode \| FragmentNode \| ConditionalNode \| EachNode` |
+| `ElementNode`     | HTML/XML element with tag, optional props, and children                                      |
+| `TextNode`        | Text content (static string or reactive getter)                                              |
+| `FragmentNode`    | Grouping node without DOM element                                                            |
+| `ConditionalNode` | Condition-based branch (`when()`)                                                            |
+| `EachNode`        | Keyed list descriptor for dynamic collections (`each()`)                                    |
 
 **Key design**:
 
 - No DOM dependency in E.1 — descriptors work without browser
 - `EventHandler` branding via `handler()` — distinguishes event callbacks from reactive getters
 - All descriptors are `Object.freeze()`d with readonly children arrays
+
+### Keyed List Rendering — `each()`
+
+Kin provides `each()` as a minimal, fine-grained view primitive for rendering dynamic collections without Virtual DOM or generic tree diffing:
+
+```ts
+each(
+  () => node.state.todos,
+  (todo) => todo.id,
+  (todo, getIndex) => TodoItemView(node, todo.id)
+)
+```
+
+**Key guarantees**:
+- **Keyed reconciliation**: Uses a stable key extractor `(item, index) => string | number` to track items. Duplicate keys throw an error.
+- **Minimal DOM operations**:
+  - **Insertion**: Appending, prepending, or inserting in the middle only creates DOM nodes for the new items.
+  - **Deletion**: Removed items are disposed and removed from the DOM; remaining items are untouched.
+  - **Reordering**: Existing DOM nodes are repositioned using `insertBefore()`; DOM identity and node instances are preserved.
+  - **Replacement**: When an item's data updates, existing DOM identity is retained.
+- **Item-local reactivity**: Reactivity is fine-grained. When an item property changes, only the specific text/prop binding for that item updates; sibling items and the parent collection do not re-render.
+- **Lifecycle cleanup**: When an item is removed from the collection or the list unmounts, all item subscriptions, event listeners, and DOM nodes are recursively disposed.
+- **No Virtual DOM**: Directly reconciles real DOM nodes between comment anchors (`<!--kin-each-->` and `<!--/kin-each-->`).
 
 ### Phase E.2 — DOM Renderer
 
@@ -430,9 +454,18 @@ Targeted DOM Update
 - **Conditional listeners** — conditional branches create/remove listeners as they mount/unmount; no duplicate or stale listeners
 - **Authorization boundaries preserved** — AuthorizedView does not leak Node, Action, Grant, or Relationship internals to event handlers
 
+**Why `handler()` is intentional**:
+
+In JavaScript and TypeScript, a `ReactiveGetter` (`() => string | number`) and an `EventHandler` (`() => void`) are structurally identical functions. A renderer cannot reliably tell them apart by signature, function arity, or property name alone.
+- Using `on[A-Z]` property-name heuristics is unsafe because reactive data props like `onlineStatus: () => node.state.online` would be misclassified as event listeners.
+- Function arity inspection fails because event handlers frequently discard unused arguments (`() => actions.increment()`).
+- Adding a nested `events: {}` object adds unnecessary nesting and structural overhead.
+
+Wrapping an event callback with `handler(fn)` is **explicit runtime intent**. It marks the function so the renderer authoritatively wires it as a DOM event listener (`addEventListener`) rather than setting up a reactive text/prop subscription.
+
 **Event naming**:
 
-The `onXxx` naming convention is only a property naming convention. The renderer converts `onClick` → `click`, `onInput` → `input`, etc., but any property name can be used as long as the value is a branded EventHandler.
+The `onXxx` naming convention is a property naming convention. The renderer converts `onClick` → `click`, `onInput` → `input`, `onKeyDown` → `keydown`, etc. Any property name can be used as long as the value is wrapped with `handler()`.
 
 **Example**:
 
@@ -449,6 +482,14 @@ function Counter(node: ReactiveNode): ChildNode {
   );
 }
 ```
+
+### Advanced View Utilities
+
+Kin exports two runtime type guards intended for custom renderers, debugging, and testing utilities, rather than normal application code:
+
+- `isEventHandler(value)`: Returns `true` if `value` was created with `handler()`.
+- `isChildNode(value)`: Returns `true` if `value` is a valid `ChildNode` descriptor (`ElementNode`, `TextNode`, `FragmentNode`, `ConditionalNode`, or `EachNode`).
+
 
 ### Phase E.5 — Real Application Composition & End-to-End Validation
 
@@ -635,15 +676,6 @@ src/
 
 ---
 
-### Capability immutability
-
-Two independent protection layers:
-
-1. `capability(fields)` snapshots the input array at call time. Pushing to `fields` after the fact does not affect the Capability.
-2. `_readSnapshot` inside each Grant is a fresh `Set` captured at Grant-creation time. Even if the Capability's `read` Set is cast and mutated, the Grant's snapshot is unaffected.
-
----
-
 ## Project Structure
 
 ```
@@ -658,29 +690,30 @@ kin-prototype/
 │   ├── relationship.ts     # Phase C/D Relationship, Grant, Capability + path validation
 │   ├── grant.ts            # Phase C GrantStore
 │   ├── authorization.ts    # Phase C/D authorization, AuthorizedView, nested proxy
+│   ├── validation.ts       # Phase F.3 state shape validation
 │   ├── view/
-│   │   ├── types.ts        # Phase E.1 — ChildNode descriptors
-│   │   ├── factory.ts      # Phase E.1 — element(), text(), fragment(), when(), handler()
+│   │   ├── types.ts        # Phase E/G — ChildNode descriptors (Element, Text, Fragment, When, Each)
+│   │   ├── factory.ts      # Phase E/G — element(), text(), fragment(), when(), each(), handler()
 │   │   └── index.ts        # View module exports
 │   ├── dom/
 │   │   ├── types.ts        # Phase E.2 — View, MountHandle
-│   │   ├── renderer.ts     # Phase E.2 — mount() with fine-grained bindings
+│   │   ├── renderer.ts     # Phase E.2 — mount() with fine-grained bindings & each() reconciliation
 │   │   └── index.ts        # DOM module exports
-│   └── index.ts            # Public exports
-├── test/
-│   ├── node.test.ts                # Phase A tests (31)
-│   ├── reactive.test.ts            # Phase B tests (35)
-│   ├── reactive-hardening.test.ts  # Phase B hardening (26)
-│   ├── phase-b-gate.test.ts        # Phase B gate (19)
-│   ├── phase-c.test.ts             # Phase C + D tests (88 — 48 Phase C, 40 Phase D)
-│   ├── phase-e1.test.ts            # Phase E.1 tests (24)
-│   ├── phase-e2.test.ts            # Phase E.2 tests (28)
-│   ├── phase-e3.test.ts            # Phase E.3 tests (22)
-│   └── phase-e4.test.ts            # Phase E.4 tests (26)
+│   └── index.ts            # Frozen public exports
+├── demo/                   # End-to-end integration scripts
+│   ├── account-sharing.ts  # Node.js capability & authorization demo
+│   └── browser-app.ts      # Browser-based account sharing UI demo
+├── playground/             # Interactive Vite applications
+│   ├── index.html          # Reactive counter demo
+│   ├── todo.html           # Dynamic keyed list demo (each())
+│   ├── account-sharing.html# Reactive authorization & sharing demo
+│   └── src/                # TypeScript application drivers
+├── test/                   # Comprehensive test suites (638 tests covering Phases A–G)
 ├── benchmark/
 │   └── bench.ts            # Benchmarks S1–S6, C1–C4
 ├── package.json
 ├── tsconfig.json
+├── tsconfig.build.json
 └── .gitignore
 ```
 
@@ -696,8 +729,9 @@ npm test
 Expected output:
 
 ```
-ℹ tests 389
-ℹ pass  389
+ℹ tests 638
+ℹ pass  633
+ℹ skipped 5
 ℹ fail  0
 ```
 
@@ -724,6 +758,8 @@ node --import tsx/esm benchmark/bench.ts
 | C     | ✅ Complete | Relationship, Grant, Capability, Authorization, Cross-node access, AuthorizedView                |
 | D     | ✅ Complete | Nested path authorization, path validation, filtered nested proxies, subtree grants              |
 | E     | ✅ Complete | View model, DOM renderer, fine-grained reactive bindings, View composition, no component runtime |
+| F     | ✅ Complete | Security hardening, state deep cloning, prototype pollution defense, proxy invariant compliance   |
+| G     | ✅ Complete | Framework usability, each() keyed dynamic lists, AuthorizedView accessor, props-optional element, API freeze |
 
 ---
 

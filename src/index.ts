@@ -91,5 +91,3 @@ export type {
   ReactiveGetter,
   EventHandler,
 } from './view/index.js'
-
-export { EVENT_HANDLER_BRAND, CHILD_NODE_BRAND } from './view/index.js'
