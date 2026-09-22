@@ -547,19 +547,33 @@ describe('EQL-1 — Object.is equality edge cases', () => {
   })
 
   it('same object reference does not notify', async () => {
-    const shared = { nested: 1 }
+    // After Phase F.3: createReactiveNode deep-clones def.state, so the
+    // internal _rawState.obj is a *clone* of the original `shared` object.
+    // The true "same reference" invariant is: assigning the exact value that
+    // is already stored internally (via ctx.state.obj) back to itself must
+    // NOT trigger notifyField, because Object.is(prev, value) === true.
+    //
+    // ctx.state is the mutating proxy; reading ctx.state.obj returns the raw
+    // internal reference (not a readonly proxy). Assigning that raw reference
+    // back to ctx.state.obj means prev === value → no notification.
     const home = createReactiveHome()
     const node = home.node({
-      state: { obj: shared },
-      actions: { set(ctx, o: { nested: number }) { ctx.state.obj = o } },
+      state: { obj: { nested: 1 } },
+      actions: {
+        // Re-assign obj to whatever is currently stored — same reference.
+        reassignSelf(ctx) {
+          const current = (ctx.state as { obj: { nested: number } }).obj
+          ;(ctx.state as { obj: { nested: number } }).obj = current
+        },
+      },
     })
     let runs = 0
     home.subscribe(() => { runs++; void node.state.obj })
     runs = 0
 
-    node.actions.set(shared)   // same reference → Object.is = true
+    node.actions.reassignSelf()   // same internal reference → Object.is = true
     await home.flush()
-    assert.equal(runs, 0, 'same reference must not notify')
+    assert.equal(runs, 0, 'same internal reference must not notify')
     home.destroy()
   })
 

@@ -1,14 +1,43 @@
 {
   "name": "kin-prototype",
-  "version": "0.1.0",
-  "description": "Kin framework prototype — Phase A (core runtime) + Phase B (reactivity) + Phase C (Relationship + Grant) + Phase D (Deep Capability Authorization) + Phase E (View/Rendering + Event Handling)",
+  "version": "0.1.0-alpha.1",
+  "description": "Kin — a minimal reactive UI framework built around a Home/Node/Relationship mental model. Fine-grained reactivity, capability-based authorization, and a platform-independent view layer.",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx/esm --test test/**/*.test.ts",
     "bench": "node --import tsx/esm benchmark/bench.ts",
     "demo": "node --import tsx/esm demo/account-sharing.ts",
     "browser-demo": "node --import tsx/esm demo/browser-app.ts"
+  },
+  "keywords": [
+    "kin",
+    "reactive",
+    "ui",
+    "framework",
+    "authorization",
+    "capability",
+    "fine-grained"
+  ],
+  "author": "Aung Sann Phyo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aungsannphyo/kin-prototype.git"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

@@ -1,9 +1,11 @@
 /**
- * Public exports
+ * Public exports — kin@0.1.0-alpha.1
  *
- * Phase A  — createHome()
- * Phase B  — createReactiveHome()
- * Phase C  — Relationship, Grant, Capability, authorization
+ * Phase A  — createHome(), Node, Home (non-reactive)
+ * Phase B  — createReactiveHome(), ReactiveNode, fine-grained reactive kernel
+ * Phase C  — Relationship, Grant, Capability, KinAuthError, AuthorizedView
+ * Phase D  — Nested capability path authorization (dot-separated paths)
+ * Phase E  — View descriptors (element/text/fragment/when/handler) + DOM mount()
  */
 
 // ---------------------------------------------------------------------------

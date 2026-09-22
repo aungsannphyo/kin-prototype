@@ -483,7 +483,7 @@ function makeMutatingProxy<S extends StateRecord>(
  * Preserves cyclic references and duplicate references.
  * Only clones arrays and plain objects; other values are returned as-is.
  */
-function deepCloneState(value: unknown, visited: Map<object, object> = new Map()): any {
+function deepCloneState(value: unknown, visited: Map<object, unknown> = new Map()): unknown {
   if (value === null || typeof value !== 'object') {
     return value
   }
@@ -493,7 +493,7 @@ function deepCloneState(value: unknown, visited: Map<object, object> = new Map()
   }
 
   if (Array.isArray(value)) {
-    const clone: any[] = []
+    const clone: unknown[] = []
     visited.set(value, clone)
     for (const item of value) {
       clone.push(deepCloneState(item, visited))
@@ -506,9 +506,9 @@ function deepCloneState(value: unknown, visited: Map<object, object> = new Map()
     return value
   }
 
-  const clone: Record<string | symbol, any> = {}
+  const clone: Record<string | symbol, unknown> = {}
   visited.set(value, clone)
-  
+
   for (const key of Reflect.ownKeys(value)) {
     const desc = Object.getOwnPropertyDescriptor(value, key)
     if (desc) {
@@ -518,7 +518,7 @@ function deepCloneState(value: unknown, visited: Map<object, object> = new Map()
       Object.defineProperty(clone, key, desc)
     }
   }
-  
+
   return clone
 }
 

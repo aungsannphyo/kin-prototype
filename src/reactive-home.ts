@@ -34,6 +34,7 @@ import { HOME_OWNER_TAG } from './types.js'
 import { createGrantStore } from './grant.js'
 import { validateGrant, createAuthorizedView, linkSubscriberToGrant } from './authorization.js'
 import { GRANT_INTERNAL, type GrantInternal, type Grant, type Relationship, type AuthorizedView } from './relationship.js'
+
 export function createReactiveHome(): ReactiveHome {
   const scope = createReactiveScope()
   const grantStore = createGrantStore()
