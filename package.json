@@ -40,7 +40,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aungsannphyo/kin-prototype.git"
+    "url": "git+https://github.com/aungsannphyo/kin-prototype.git"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
