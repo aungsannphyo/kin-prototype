@@ -1,5 +1,5 @@
 /**
- * Kin Browser Playground — Todo Application
+ * Kin Browser Playground — Task Application
  *
  * Stresses the existing Kin frontend architecture:
  * - Dynamic list rendering using ONLY Kin's public API
@@ -62,8 +62,8 @@ export function createTodoNode(
   // Ensure _nextId does not collide with manually provided initial todo ids
   for (const t of initialTodos) {
     const match = /^t-(\d+)$/.exec(t.id)
-    if (match && match[1]) {
-      const num = parseInt(match[1], 10)
+    if (match?.[1]) {
+      const num = Number.parseInt(match[1], 10)
       if (num >= _nextId) {
         _nextId = num + 1
       }
@@ -109,7 +109,7 @@ export function TodoItemView(
     {
       class: () => {
         const item = node.state.todos.find((t) => t.id === id)
-        return item && item.completed ? 'todo-item completed' : 'todo-item'
+        return item?.completed ? 'todo-item completed' : 'todo-item'
       },
       id: `todo-${id}`,
     },
@@ -119,7 +119,7 @@ export function TodoItemView(
       {
         class: () => {
           const item = node.state.todos.find((t) => t.id === id)
-          return item && item.completed ? 'btn-toggle checked' : 'btn-toggle'
+          return item?.completed ? 'btn-toggle checked' : 'btn-toggle'
         },
         id: `toggle-${id}`,
         title: 'Toggle completion',
@@ -129,7 +129,7 @@ export function TodoItemView(
       },
       text(() => {
         const item = node.state.todos.find((t) => t.id === id)
-        return item && item.completed ? '✓' : '○'
+        return item?.completed ? '✓' : '○'
       }),
     ),
     // Title
@@ -138,7 +138,7 @@ export function TodoItemView(
       { class: 'todo-title' },
       text(() => {
         const item = node.state.todos.find((t) => t.id === id)
-        return item ? item.title : ''
+        return item?.title ?? ''
       }),
     ),
     // Remove button

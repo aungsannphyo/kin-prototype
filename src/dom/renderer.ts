@@ -270,6 +270,120 @@ type EachItemRecord = {
   readonly nodes: globalThis.Node[]
 }
 
+function buildCollectionKeys(
+  desc: EachNode,
+  items: unknown[],
+): (string | number)[] {
+  const nextKeys: (string | number)[] = []
+  const seenKeys = new Set<string | number>()
+  for (let i = 0; i < items.length; i++) {
+    const key = desc.key(items[i], i)
+    if (seenKeys.has(key)) {
+      throw new Error(`Duplicate key "${String(key)}" detected in each()`)
+    }
+    seenKeys.add(key)
+    nextKeys.push(key)
+  }
+  return nextKeys
+}
+
+function removeStaleItems(
+  home: ReactiveHome,
+  rec: RenderRecord,
+  currentMap: Map<string | number, EachItemRecord>,
+  nextKeySet: Set<string | number>,
+): void {
+  for (const [key, itemRec] of currentMap.entries()) {
+    if (!nextKeySet.has(key)) {
+      disposeRecord(home, itemRec.rec)
+      const idx = rec.children.indexOf(itemRec.rec)
+      if (idx >= 0) rec.children.splice(idx, 1)
+      currentMap.delete(key)
+    }
+  }
+}
+
+function createEachItem(
+  desc: EachNode,
+  home: ReactiveHome,
+  rec: RenderRecord,
+  currentMap: Map<string | number, EachItemRecord>,
+  key: string | number,
+  item: unknown,
+  index: number,
+): EachItemRecord {
+  let currentIndex = index
+  const getIndex = () => currentIndex
+  const itemRecRecord = emptyRecord()
+  rec.children.push(itemRecRecord)
+  const nodes = materialize(desc.render(item, getIndex), home, itemRecRecord)
+  const itemRec: EachItemRecord = { key, item, index: currentIndex, getIndex, rec: itemRecRecord, nodes }
+  currentMap.set(key, itemRec)
+  return itemRec
+}
+
+function mountEachInitial(
+  desc: EachNode,
+  home: ReactiveHome,
+  rec: RenderRecord,
+  currentMap: Map<string | number, EachItemRecord>,
+  items: unknown[],
+  nextKeys: (string | number)[],
+): globalThis.Node[] {
+  const nodes: globalThis.Node[] = []
+  for (let i = 0; i < items.length; i++) {
+    const itemRec = createEachItem(desc, home, rec, currentMap, nextKeys[i], items[i], i)
+    for (const n of itemRec.nodes) nodes.push(n)
+  }
+  return nodes
+}
+
+function insertNodesBefore(nodes: globalThis.Node[], refNode: globalThis.Node): void {
+  for (const n of nodes) {
+    (refNode as globalThis.ChildNode).before(n)
+  }
+}
+
+function repositionItem(itemRec: EachItemRecord, i: number, item: unknown, refNode: globalThis.Node): void {
+  itemRec.item = item
+  itemRec.index = i
+  const lastNode = itemRec.nodes.at(-1)
+  const isInPlace = lastNode?.nextSibling === refNode
+  if (!isInPlace && itemRec.nodes.length > 0) {
+    insertNodesBefore(itemRec.nodes, refNode)
+  }
+}
+
+function reconcileEach(
+  desc: EachNode,
+  home: ReactiveHome,
+  rec: RenderRecord,
+  currentMap: Map<string | number, EachItemRecord>,
+  items: unknown[],
+  nextKeys: (string | number)[],
+  endMarker: globalThis.Node,
+): void {
+  if (!endMarker.parentNode) return
+
+  let refNode: globalThis.Node = endMarker
+
+  for (let i = items.length - 1; i >= 0; i--) {
+    const key = nextKeys[i]
+    let itemRec = currentMap.get(key)
+
+    if (!itemRec) {
+      itemRec = createEachItem(desc, home, rec, currentMap, key, items[i], i)
+      insertNodesBefore(itemRec.nodes, refNode)
+    } else {
+      repositionItem(itemRec, i, items[i], refNode)
+    }
+
+    if (itemRec.nodes.length > 0) {
+      refNode = itemRec.nodes[0]
+    }
+  }
+}
+
 function mountEach(
   desc: EachNode,
   home: ReactiveHome,
@@ -288,115 +402,17 @@ function mountEach(
 
     const raw = desc.collection()
     const items = raw != null ? Array.from(raw) : []
+    const nextKeys = buildCollectionKeys(desc, items)
 
-    // 1. Validate keys and detect duplicates
-    const nextKeys: (string | number)[] = []
-    const seenKeys = new Set<string | number>()
-    for (let i = 0; i < items.length; i++) {
-      const key = desc.key(items[i], i)
-      if (seenKeys.has(key)) {
-        throw new Error(`Duplicate key "${String(key)}" detected in each()`)
-      }
-      seenKeys.add(key)
-      nextKeys.push(key)
-    }
+    removeStaleItems(home, rec, currentMap, new Set(nextKeys))
 
-    // 2. Remove items no longer in collection
-    const nextKeySet = new Set(nextKeys)
-    for (const [key, itemRec] of currentMap.entries()) {
-      if (!nextKeySet.has(key)) {
-        disposeRecord(home, itemRec.rec)
-        const idx = rec.children.indexOf(itemRec.rec)
-        if (idx >= 0) rec.children.splice(idx, 1)
-        currentMap.delete(key)
-      }
-    }
-
-    // 3. Initial Mount: populate initialNodes for parent attachment
     if (isFirstRun) {
       isFirstRun = false
-      initialNodes = []
-      for (let i = 0; i < items.length; i++) {
-        const key = nextKeys[i]
-        const item = items[i]
-        let currentIndex = i
-        const getIndex = () => currentIndex
-
-        const itemRecRecord = emptyRecord()
-        rec.children.push(itemRecRecord)
-
-        const vNode = desc.render(item, getIndex)
-        const nodes = materialize(vNode, home, itemRecRecord)
-
-        const itemRec: EachItemRecord = {
-          key,
-          item,
-          index: currentIndex,
-          getIndex,
-          rec: itemRecRecord,
-          nodes,
-        }
-        currentMap.set(key, itemRec)
-        for (const n of nodes) {
-          initialNodes.push(n)
-        }
-      }
+      initialNodes = mountEachInitial(desc, home, rec, currentMap, items, nextKeys)
       return
     }
 
-    // 4. Reactive Updates: Reconcile and preserve DOM identity
-    const parent = endMarker.parentNode
-    if (!parent) return
-
-    let refNode: globalThis.Node = endMarker
-
-    for (let i = items.length - 1; i >= 0; i--) {
-      const key = nextKeys[i]
-      const item = items[i]
-      let itemRec = currentMap.get(key)
-
-      if (!itemRec) {
-        // Newly inserted item
-        let currentIndex = i
-        const getIndex = () => currentIndex
-        const itemRecRecord = emptyRecord()
-        rec.children.push(itemRecRecord)
-
-        const vNode = desc.render(item, getIndex)
-        const nodes = materialize(vNode, home, itemRecRecord)
-
-        itemRec = {
-          key,
-          item,
-          index: currentIndex,
-          getIndex,
-          rec: itemRecRecord,
-          nodes,
-        }
-        currentMap.set(key, itemRec)
-
-        for (const n of nodes) {
-          parent.insertBefore(n, refNode)
-        }
-      } else {
-        // Existing item: update index and position if needed
-        itemRec.item = item
-        itemRec.index = i
-
-        const lastNode = itemRec.nodes[itemRec.nodes.length - 1]
-        const isInPlace = lastNode !== undefined && lastNode.nextSibling === refNode
-
-        if (!isInPlace && itemRec.nodes.length > 0) {
-          for (const n of itemRec.nodes) {
-            parent.insertBefore(n, refNode)
-          }
-        }
-      }
-
-      if (itemRec.nodes.length > 0) {
-        refNode = itemRec.nodes[0]
-      }
-    }
+    reconcileEach(desc, home, rec, currentMap, items, nextKeys, endMarker)
   })
 
   rec.subscriptions.push(sub)
@@ -554,7 +570,7 @@ function applyDomValue(
   }
 
   if (key === 'value' && 'value' in el) {
-    applyInputValue(el, value === null ? '' : value)
+    applyInputValue(el, value ?? '')
     return
   }
 

@@ -88,6 +88,43 @@ export type SecurityAuditResult = {
   rawNodeHidden: boolean
 }
 
+// ---------------------------------------------------------------------------
+// Pure security-audit helpers (no closure state required)
+// ---------------------------------------------------------------------------
+
+function checkFieldBlocked(accessor: () => unknown): boolean {
+  try {
+    accessor()
+    return false
+  } catch (e) {
+    return e instanceof KinAuthError && e.code === 'FIELD_NOT_GRANTED'
+  }
+}
+
+function checkMutationBlocked(mutator: () => void): boolean {
+  try {
+    mutator()
+    return false
+  } catch (e) {
+    return e instanceof TypeError
+  }
+}
+
+function checkPrototypeBlocked(view: AuthorizedView<AliceState>): boolean {
+  const proto = Object.getPrototypeOf(view.state)
+  const constructor = (view.state as any).constructor
+  return proto === null && constructor === undefined
+}
+
+function checkRawNodeHidden(view: AuthorizedView<AliceState>): boolean {
+  return (
+    (view as any).node === undefined &&
+    (view as any)._node === undefined &&
+    (view as any).target === undefined &&
+    (view as any).actions === undefined
+  )
+}
+
 export function createAccountSharingApp(
   container: HTMLElement,
 ): AccountSharingApp {
@@ -156,70 +193,18 @@ export function createAccountSharingApp(
       }
     }
 
-    let nestedBalanceBlocked = false
-    try {
-      // Accessing unauthorized field 'balance'
-      void (activeAuthorizedView.state as any).balance
-    } catch (e) {
-      if (e instanceof KinAuthError && e.code === 'FIELD_NOT_GRANTED') {
-        nestedBalanceBlocked = true
-      }
-    }
-
-    let nestedPasswordBlocked = false
-    try {
-      // Accessing unauthorized nested field 'profile.password'
-      void (activeAuthorizedView.state.profile as any).password
-    } catch (e) {
-      if (e instanceof KinAuthError && e.code === 'FIELD_NOT_GRANTED') {
-        nestedPasswordBlocked = true
-      }
-    }
-
-    let nestedAddressBlocked = false
-    try {
-      // Accessing unauthorized nested field 'profile.address'
-      void (activeAuthorizedView.state.profile as any).address
-    } catch (e) {
-      if (e instanceof KinAuthError && e.code === 'FIELD_NOT_GRANTED') {
-        nestedAddressBlocked = true
-      }
-    }
-
-    let mutationBlocked = false
-    try {
-      // Attempting to mutate read-only authorized view
-      ;(activeAuthorizedView.state.profile as any).name = 'Malicious Update'
-    } catch (e) {
-      if (e instanceof TypeError) {
-        mutationBlocked = true
-      }
-    }
-
-    let prototypeBlocked = false
-    const proto1 = (activeAuthorizedView.state as any).__proto__
-    const proto2 = (activeAuthorizedView.state as any).constructor
-    const proto3 = Object.getPrototypeOf(activeAuthorizedView.state)
-    if (proto1 === undefined && proto2 === undefined && proto3 === null) {
-      prototypeBlocked = true
-    }
-
-    const keysExposed = Object.keys(activeAuthorizedView.state.profile)
-
-    const rawNodeHidden =
-      (activeAuthorizedView as any).node === undefined &&
-      (activeAuthorizedView as any)._node === undefined &&
-      (activeAuthorizedView as any).target === undefined &&
-      (activeAuthorizedView as any).actions === undefined
+    const view = activeAuthorizedView
 
     return {
-      nestedBalanceBlocked,
-      nestedPasswordBlocked,
-      nestedAddressBlocked,
-      mutationBlocked,
-      prototypeBlocked,
-      keysExposed,
-      rawNodeHidden,
+      nestedBalanceBlocked: checkFieldBlocked(() => (view.state as any).balance),
+      nestedPasswordBlocked: checkFieldBlocked(() => (view.state.profile as any).password),
+      nestedAddressBlocked: checkFieldBlocked(() => (view.state.profile as any).address),
+      mutationBlocked: checkMutationBlocked(() => {
+        ;(view.state.profile as any).name = 'Malicious Update'
+      }),
+      prototypeBlocked: checkPrototypeBlocked(view),
+      keysExposed: Object.keys(view.state.profile),
+      rawNodeHidden: checkRawNodeHidden(view),
     }
   }
 
