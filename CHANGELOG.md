@@ -88,6 +88,7 @@ It is intended for internal review and early adopter feedback only.
 - Synchronous AuthorizedView access: `grant.view()` and `home.authorizedView(source, target, grant)`
 - Optional props in `element(tag, ...children)`
 - Public API freeze: internal branding symbols (`EVENT_HANDLER_BRAND`, `CHILD_NODE_BRAND`) kept module-private to `src/view/`
+- External consumer validation: verified standalone package installation, strict TypeScript compilation, and browser runtime execution
 
 ---
 

@@ -1,776 +1,769 @@
-# kin-prototype
+# Kin
 
-A minimal frontend UI framework built from scratch around a **family/relationship mental model**.
+Kin is a minimal, fine-grained reactive UI framework with built-in capability-based authorization and direct DOM rendering.
 
-This repository is an active prototype. Phases A, B, C, D, E, F, and G are complete.
+Kin is designed around a family/relationship mental model. Applications are structured as an ownership tree of stateful **Nodes** inside a container **Home**. Data sharing between nodes is explicitly authorized through **Relationships**, **Grants**, and **Capabilities**. Views are platform-independent, immutable descriptors rendered directly to the DOM with targeted, fine-grained updates — without a Virtual DOM diffing engine or component lifecycle runtime.
 
 ---
 
-## Mental Model
+## Central Philosophy
 
-The framework has one fundamental runtime entity:
+* **Reactive State**: State is owned by Nodes and exposed as readonly data. Reading state fields inside reactive getters registers fine-grained subscriptions automatically.
+* **Explicit Actions**: State mutations are strictly isolated to Actions. Outside of an Action, Node state is deeply immutable.
+* **Ownership Tree**: Nodes exist in an explicit hierarchy (`Home → Node → Node children`) with deterministic post-order cascade destruction.
+* **Authorization-First Sharing**: Cross-node data access is governed by revocable `Grant` tokens carrying scoped `Capability` paths, exposing capability-filtered `AuthorizedView` proxies.
+* **Fine-Grained DOM Updates**: Subscriptions bind directly to individual DOM text nodes and element properties. When state changes, only affected bindings are updated.
+* **Immutable View Descriptors**: Views are pure TypeScript functions returning frozen descriptor trees (`ElementNode`, `TextNode`, `FragmentNode`, `ConditionalNode`, `EachNode`).
+* **Direct DOM Rendering**: The renderer translates descriptors directly into real DOM nodes. There is no Virtual DOM, no tree diffing, and no component instance runtime.
 
-```
+---
+
+## Why Kin?
+
+Traditional frontend frameworks typically couple state management, component tree hierarchies, and UI rendering together through a Virtual DOM or complex component lifecycle systems. Cross-cutting concerns like data authorization, access control, and cross-boundary sharing are often left to external state libraries or UI-level conditional checks.
+
+Kin takes a different approach by treating **data ownership and authorization as core runtime primitives**:
+
+```text
 Home
  └── Node
       ├── State
       ├── Actions
-      ├── Children
-      ├── Reactivity (Phase B)
-      └── Relationships (Phase C / D)
+      └── Relationships / Grants
 ```
 
-`Parent` and `Child` are **not** classes or types. They are **dynamic roles** derived from ownership:
-
-| Situation                   | Role                 |
-| --------------------------- | -------------------- |
-| Node owned by Home          | `isChild === false`  |
-| Node owned by another Node  | `isChild === true`   |
-| Node owns one or more Nodes | `isParent === true`  |
-| Node owns no Nodes          | `isParent === false` |
-
-A Node can be both Parent and Child simultaneously (a "middle" node in the tree).
-
-**Example tree:**
-
-```
-Home
-├── A          → isParent=true,  isChild=false
-│   ├── C      → isParent=true,  isChild=true
-│   │   └── E  → isParent=false, isChild=true
-│   └── D      → isParent=false, isChild=true
-└── B          → isParent=true,  isChild=false
-    └── F      → isParent=false, isChild=true
-```
-
----
-
-## Entry Point Decision — `createHome` vs `createReactiveHome`
-
-There are two Home factories in the codebase:
-
-| Factory                | Status                           | When to use                                                                             |
-| ---------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
-| `createReactiveHome()` | **Active — use this**            | All new code. Phases C, D, and all future framework development build on this.          |
-| `createHome()`         | **Retained — non-reactive only** | Low-level testing and Phase A contract verification. Not intended for application code. |
-
-If you are building application code, use `createReactiveHome()`.
-
----
-
-## Phase A — Core Runtime
-
-Implemented and stable. No further changes planned.
-
-### Primitives
-
-| Primitive         | Description                                                                                      |
-| ----------------- | ------------------------------------------------------------------------------------------------ |
-| `Home`            | Root container. Creates and owns root-level Nodes. Not a Node itself.                            |
-| `Node<S>`         | Generic node with optional State, optional Actions, and zero or more children.                   |
-| `State`           | Plain object owned by exactly one Node. Public surface is readonly.                              |
-| `Actions`         | The only mutation boundary. Actions receive a mutable `ctx.state`.                               |
-| `Lifecycle`       | `active → destroyed`. Nodes cannot mutate, create children, or invoke actions after destruction. |
-| `Cascade Destroy` | Post-order destruction — children are destroyed before their parent.                             |
-
-### Key Design Rules
-
-- **Single owner** — a Node has exactly one owner (either Home or another Node). No re-parenting API.
-- **Action-only mutation** — `node.state` is a readonly Proxy outside of an Action. Direct assignment throws a `TypeError` at runtime.
-- **Cascade destruction** — destroying a Node destroys all descendants first (post-order), then detaches from its owner.
-- **Dynamic roles** — `isParent` and `isChild` are derived getters, not stored booleans.
-- **No `any`** — generics throughout. State type `S` flows from definition to `ctx.state` and `node.state`.
-
----
-
-## Phase B — Fine-Grained Reactivity
-
-Implemented and hardened. Built on top of Phase A.
-
-### How It Works
-
-```
-Action mutates ctx.state.field
-    → Object.is(prev, next) — skip if equal
-    → scope.notifyField("nodeId:field")
-    → FieldSubscriberIndex lookup  O(1)
-    → affected subscribers scheduled
-    → microtask flush
-    → subscribers re-run, dependencies rebuilt
-```
-
-State updates never traverse the ownership tree or any relationship graph.
-
-### API
-
-```ts
-import { createReactiveHome } from "kin-prototype";
-
-const home = createReactiveHome();
-
-const account = home.node({
-  state: { balance: 100 },
-  actions: {
-    deposit(ctx, amount: number) {
-      ctx.state.balance += amount;
-    },
-    withdraw(ctx, amount: number) {
-      ctx.state.balance -= amount;
-    },
-  },
-});
-
-account.state.balance; // 100
-account.state.balance = 999; // TypeError — readonly outside action
-
-account.actions.deposit(50);
-account.state.balance; // 150
-
-const sub = home.subscribe(() => {
-  console.log("balance:", account.state.balance);
-});
-
-home.unsubscribe(sub);
-await home.flush();
-
-account.destroy();
-home.destroy();
-```
-
-### Reactivity Properties
-
-- **Field-level tracking** — dependencies tracked at `nodeId:fieldName` level
-- **Auto-tracking** — reading `node.state.field` inside a subscriber registers the dep automatically
-- **Dynamic deps** — dep set rebuilt from scratch on every subscriber re-run
-- **Batching** — multiple mutations before a flush → subscriber runs once per flush
-- **Object.is equality** — same-value assignments do not notify
-- **No tree traversal** — state update cost is O(subscribers for that field), independent of node count
-- **Cascade cleanup** — destroying a node disposes all its field subscriptions
-
-### Security Boundaries
-
-- `node.state` (public) is a **read-only tracking proxy** — throws `TypeError` on write
-- `ctx.state` (inside actions) is a **mutating proxy** — checks lifecycle; throws if node is destroyed
-- `ReactiveScope` is **internal only** and not exposed through the public API
-
----
-
-## Phase C — Cross-Node Authorization
-
-Implemented and stable. Built on top of Phase B.
-
-### How It Works
+When connecting a user interface to application state, Kin bypasses whole-component re-evaluation and tree diffing:
 
 ```text
-Relationship
-      ↓
-    Grant
-      ↓
-  Capability
-      ↓
-Authorization (checked once at subscribeAs() time)
-      ↓
-AuthorizedView → Phase B tracking machinery
-```
-
-**Relationship**: "who is connected to whom". Does NOT itself grant access.
-
-**Grant**: Revocable authorization over a Relationship. Issued via `relationship.grant(capability(...))`.
-
-**Capability**: The specific fields the Grant allows reading. Enforced at read time through `AuthorizedView`.
-
-**Authorization**: Checked once at `subscribeAs()` call time — never during state mutation.
-
-### API
-
-```ts
-import { createReactiveHome, capability } from "kin-prototype";
-
-const home = createReactiveHome();
-
-const alice = home.node({ state: { balance: 100 } });
-const bob = home.node({
-  state: { balance: 50 },
-  actions: {
-    deposit(ctx, n: number) {
-      ctx.state.balance += n;
-    },
-  },
-});
-
-const rel = home.relationship(alice, bob);
-const grant = rel.grant(capability(["balance"]));
-
-home.subscribeAs(alice, bob, grant, (view) => {
-  console.log("Bob balance:", view.state.balance); // ✓ allowed
-  // view.state.secret  → throws KinAuthError('FIELD_NOT_GRANTED')
-  // view.actions       → undefined
-});
-
-grant.revoke(); // subscription automatically disposed
-```
-
-### Key Design Rules
-
-- **Explicit Grant selection** — `subscribeAs()` requires the caller to supply the exact Grant. No implicit "first active Grant" search.
-- **Authorization at subscription time** — `notifyField → _fieldIndex → schedule → flush` is completely unchanged.
-- **AuthorizedView** — callback receives only `AuthorizedView<S>`, never the raw `ReactiveNode`.
-- **Revocation** — revoking Grant A disposes only its own subscriptions; Grant B unaffected; re-granting does NOT restore old subscriptions.
-- **Owner authority distinct** — no wildcard Capability. Owner authority is structural.
-
-### Security Boundaries
-
-- `AuthorizedView` exposes only `state` — no `actions`, `destroy`, `child`, `isParent`, `isChild`, or internal Symbols.
-- `AuthorizedView` is `Object.freeze()`d — property injection rejected.
-- Denied field reads throw `KinAuthError('FIELD_NOT_GRANTED')` with no dep registration.
-- `KinAuthError` codes: `GRANT_REVOKED`, `RELATIONSHIP_DESTROYED`, `GRANT_MISMATCH`, `FIELD_NOT_GRANTED`, `NO_RELATIONSHIP`, `NO_GRANT`.
-- Grant for A→B cannot authorize A→C or X→B (`GRANT_MISMATCH`).
-- `readSnapshot` is captured defensively at Grant-creation time — post-issuance Capability mutation cannot expand access.
-
----
-
-## Phase D — Deep/Nested Capability Authorization
-
-Implemented and stable. Built on top of Phase C. No changes to the Phase B reactive kernel.
-
-### What Phase D adds
-
-Phase C Capability was top-level-field based: `capability(['balance'])` authorized the `balance` key and its entire subtree.
-
-Phase D extends this with **explicit nested path authorization**:
-
-```ts
-capability(["balance", "profile.name", "profile.email"]);
-```
-
-This allows fine-grained control over which nested fields are accessible through the `AuthorizedView`.
-
-### Path grammar
-
-Valid paths follow JavaScript identifier rules:
-
-```
-segment := [a-zA-Z_$][a-zA-Z0-9_$]*
-path    := segment ('.' segment)*
-```
-
-**Invalid paths** — rejected at `capability()` time with `TypeError`:
-
-| Pattern                                       | Reason                    |
-| --------------------------------------------- | ------------------------- |
-| `""`                                          | Empty string              |
-| `"0"`, `"items.0"`                            | Numeric segments          |
-| `"__proto__"`, `"constructor"`, `"prototype"` | Prototype-chain names     |
-| `"__anything"`                                | Double-underscore prefix  |
-| `"profile."`, `".profile"`, `"a..b"`          | Invalid dot placement     |
-| `"profile-name"`, `"profile name"`            | Non-identifier characters |
-
-### Authorization semantics
-
-Three rules apply at read time:
-
-| Situation                                                             | Behavior                                     |
-| --------------------------------------------------------------------- | -------------------------------------------- |
-| Path is in capability exactly                                         | ✓ allow — return value                       |
-| Path has an authorized ancestor (`'profile'` grants `'profile.name'`) | ✓ allow — return value (subtree grant)       |
-| Path has an authorized descendant only                                | ✓ allow — return a **filtered nested proxy** |
-| No match                                                              | ✗ throw `KinAuthError('FIELD_NOT_GRANTED')`  |
-
-### API example
-
-```ts
-const rel = home.relationship(source, target);
-const grant = rel.grant(
-  capability(["balance", "profile.name", "profile.email"]),
-);
-
-home.subscribeAs(source, target, grant, (view) => {
-  view.state.balance; // ✓ allowed
-  view.state.profile.name; // ✓ allowed — filtered nested proxy
-  view.state.profile.email; // ✓ allowed
-  view.state.profile.password; // ✗ throws FIELD_NOT_GRANTED
-  view.state.secret; // ✗ throws FIELD_NOT_GRANTED
-});
-```
-
-### Subtree grant (Phase C backward compatibility)
-
-`capability(["profile"])` still grants the entire `profile` subtree — all nested fields are readable. This is unchanged from Phase C.
-
-### Reactive tracking — Phase D documented limitation
-
-Reactive dependency tracking remains **top-level** in Phase D. Reading `view.state.profile.name` registers a dep on `nodeId:profile` (not `nodeId:profile.name`).
-
-Consequences:
-
-- **Replacing** the `profile` object (`ctx.state.profile = newProfile`) **triggers** the subscriber. ✓
-- **Mutating** a nested field in-place (`ctx.state.profile.name = 'x'`) without replacing the object reference does **NOT** trigger the subscriber.
-
-This is intentional. Deep reactive tracking (tracking `nodeId:profile.name` independently) is deferred to a future phase.
-
-### Capability immutability
-
-Two independent protection layers:
-
-1. `capability(fields)` snapshots the input array at call time. Pushing to `fields` after the fact does not affect the Capability.
-2. `_readSnapshot` inside each Grant is a fresh `Set` captured at Grant-creation time. Even if the Capability's `read` Set is cast and mutated, the Grant's snapshot is unaffected.
-
----
-
-## Phase E — View / Rendering
-
-Implemented and stable. Built on top of Phase A–D. No changes to the reactive kernel or authorization system.
-
-### Architecture
-
-Phase E introduces a declarative View layer that is **platform-independent** and **component-free**:
-
-```
-View Definition (plain function)
-      ↓
-ChildNode descriptor (immutable)
-      ↓
-Renderer (DOM in Phase E.2)
-      ↓
-DOM
-```
-
-### Phase E.1 — View Model
-
-Immutable, platform-independent descriptor types:
-
-| Type              | Description                                                                                  |
-| ----------------- | -------------------------------------------------------------------------------------------- |
-| `ChildNode`       | Discriminated union: `ElementNode \| TextNode \| FragmentNode \| ConditionalNode \| EachNode` |
-| `ElementNode`     | HTML/XML element with tag, optional props, and children                                      |
-| `TextNode`        | Text content (static string or reactive getter)                                              |
-| `FragmentNode`    | Grouping node without DOM element                                                            |
-| `ConditionalNode` | Condition-based branch (`when()`)                                                            |
-| `EachNode`        | Keyed list descriptor for dynamic collections (`each()`)                                    |
-
-**Key design**:
-
-- No DOM dependency in E.1 — descriptors work without browser
-- `EventHandler` branding via `handler()` — distinguishes event callbacks from reactive getters
-- All descriptors are `Object.freeze()`d with readonly children arrays
-
-### Keyed List Rendering — `each()`
-
-Kin provides `each()` as a minimal, fine-grained view primitive for rendering dynamic collections without Virtual DOM or generic tree diffing:
-
-```ts
-each(
-  () => node.state.todos,
-  (todo) => todo.id,
-  (todo, getIndex) => TodoItemView(node, todo.id)
-)
-```
-
-**Key guarantees**:
-- **Keyed reconciliation**: Uses a stable key extractor `(item, index) => string | number` to track items. Duplicate keys throw an error.
-- **Minimal DOM operations**:
-  - **Insertion**: Appending, prepending, or inserting in the middle only creates DOM nodes for the new items.
-  - **Deletion**: Removed items are disposed and removed from the DOM; remaining items are untouched.
-  - **Reordering**: Existing DOM nodes are repositioned using `insertBefore()`; DOM identity and node instances are preserved.
-  - **Replacement**: When an item's data updates, existing DOM identity is retained.
-- **Item-local reactivity**: Reactivity is fine-grained. When an item property changes, only the specific text/prop binding for that item updates; sibling items and the parent collection do not re-render.
-- **Lifecycle cleanup**: When an item is removed from the collection or the list unmounts, all item subscriptions, event listeners, and DOM nodes are recursively disposed.
-- **No Virtual DOM**: Directly reconciles real DOM nodes between comment anchors (`<!--kin-each-->` and `<!--/kin-each-->`).
-
-### Phase E.2 — DOM Renderer
-
-Fine-grained DOM renderer that:
-
-- Walks the descriptor tree once at mount
-- Creates one Kin subscription per reactive getter/condition
-- Updates only the affected DOM node on state change
-- No Virtual DOM, no diffing, no whole-tree rerender
-
-**Update path** (unchanged kernel):
-
-```
-Action → mutation proxy → notifyField → _fieldIndex → schedule → flush
-      → affected subscription → single DOM node update
-```
-
-### Phase E.3 — View Composition
-
-**Views are plain functions**, not components:
-
-```ts
-function Header(): ChildNode {
-  return element("header", {}, text("Kin"));
-}
-
-function Counter(node: ReactiveNode): ChildNode {
-  return element(
-    "button",
-    { onClick: handler(() => node.actions.increment()) },
-    text(() => String(node.state.count)),
-  );
-}
-
-function App(node: ReactiveNode): ChildNode {
-  return element("main", {}, Header(), Counter(node));
-}
-```
-
-**Key guarantees**:
-
-- View functions execute once at mount, not on every state change
-- Composition is ordinary function composition
-- No component instances, lifecycle hooks, or VDOM
-- Fine-grained reactive bindings remain independent
-- Authorization boundaries preserved
-
-### Phase E.4 — Browser Interaction & Event-to-Action Boundary
-
-**Phase E.4 hardens the event interaction path**:
-
-```
-DOM Event
-  ↓
-EventHandler (branded via handler())
-  ↓
-Application callback
-  ↓
-Kin Action
-  ↓
-State Mutation
-  ↓
-Reactive Subscription
-  ↓
-Targeted DOM Update
-```
-
-**Key architectural guarantees**:
-
-- **EventHandler branding is authoritative** — `isEventHandler()` distinguishes event callbacks from reactive getters using the `EVENT_HANDLER_BRAND` symbol, NOT property name heuristics
-- **Renderer is generic** — the DOM renderer knows about DOM, EventHandler, ChildNode, and subscriptions, but NOT about Actions, Nodes, Relationships, Grants, or authorization
-- **Application code connects events to Kin Actions** — the renderer only executes the EventHandler; the application decides what the handler does
-- **Native events** — handlers receive native browser events; no synthetic event system
-- **No View rerender** — state updates patch only the affected DOM binding; View functions execute once at mount
-- **Listener cleanup** — every DOM listener is tracked; unmount removes listeners, subscriptions, and DOM nodes
-- **Conditional listeners** — conditional branches create/remove listeners as they mount/unmount; no duplicate or stale listeners
-- **Authorization boundaries preserved** — AuthorizedView does not leak Node, Action, Grant, or Relationship internals to event handlers
-
-**Why `handler()` is intentional**:
-
-In JavaScript and TypeScript, a `ReactiveGetter` (`() => string | number`) and an `EventHandler` (`() => void`) are structurally identical functions. A renderer cannot reliably tell them apart by signature, function arity, or property name alone.
-- Using `on[A-Z]` property-name heuristics is unsafe because reactive data props like `onlineStatus: () => node.state.online` would be misclassified as event listeners.
-- Function arity inspection fails because event handlers frequently discard unused arguments (`() => actions.increment()`).
-- Adding a nested `events: {}` object adds unnecessary nesting and structural overhead.
-
-Wrapping an event callback with `handler(fn)` is **explicit runtime intent**. It marks the function so the renderer authoritatively wires it as a DOM event listener (`addEventListener`) rather than setting up a reactive text/prop subscription.
-
-**Event naming**:
-
-The `onXxx` naming convention is a property naming convention. The renderer converts `onClick` → `click`, `onInput` → `input`, `onKeyDown` → `keydown`, etc. Any property name can be used as long as the value is wrapped with `handler()`.
-
-**Example**:
-
-```ts
-function Counter(node: ReactiveNode): ChildNode {
-  return element(
-    "button",
-    {
-      onClick: handler(() => {
-        node.actions.increment();
-      }),
-    },
-    text(() => String(node.state.count)),
-  );
-}
-```
-
-### Advanced View Utilities
-
-Kin exports two runtime type guards intended for custom renderers, debugging, and testing utilities, rather than normal application code:
-
-- `isEventHandler(value)`: Returns `true` if `value` was created with `handler()`.
-- `isChildNode(value)`: Returns `true` if `value` is a valid `ChildNode` descriptor (`ElementNode`, `TextNode`, `FragmentNode`, `ConditionalNode`, or `EachNode`).
-
-
-### Phase E.5 — Real Application Composition & End-to-End Validation
-
-**Phase E.5 is an integration/validation phase** — it does NOT introduce new framework primitives. Instead, it proves that the existing Kin architecture can build a realistic browser application using ONLY primitives from Phases A–E.4.
-
-**Complete application flow**:
-
-```
 State
   ↓
-Actions
+Reactive getter
   ↓
-Relationships
+View descriptor
   ↓
-Grants
+DOM renderer
   ↓
-Deep Authorization
-  ↓
-AuthorizedView
-  ↓
-View Composition
-  ↓
-DOM Renderer
-  ↓
-Browser Event
-  ↓
-EventHandler
-  ↓
-Kin Action
-  ↓
-State Mutation
-  ↓
-Fine-Grained Reactive DOM Update
+Targeted DOM update
 ```
 
-**Application scenario**:
+1. **Deterministic boundaries**: A Node cannot mutate another Node's state directly.
+2. **Authorized observation**: An observer Node can only view fields explicitly permitted by an active `Grant`. Unauthorized fields throw at the proxy boundary before reaching the UI.
+3. **Surgical reactivity**: State mutations schedule microtask flushes that update only the exact DOM text node or attribute registered to that field. View functions run once at mount time.
 
-The demo implements the **Account Sharing / Customer Access** scenario:
+---
 
-- **Alice Node**: Owns account with `balance` and `profile` (name, email, address, password)
-- **Bob Node**: Separate observer node
-- **Relationship**: Bob → Alice (Bob observes Alice)
-- **Grant**: Restricted capability for `profile.name` and `profile.email` only
-- **AuthorizedView**: Bob receives filtered view of Alice's state
-- **Browser UI**: Alice sees full account; Bob sees only authorized fields
+## Installation
 
-**Key architectural validations**:
-
-- **No component runtime**: Views are plain TypeScript functions, not React-like components
-- **Authorization enforced at source**: Unauthorized fields (balance, address, password) cannot reach Bob's View or DOM — not merely hidden
-- **Fine-grained reactivity**: Changing balance does not execute name/email bindings
-- **No View rerender**: View functions execute once at mount; state changes update only affected DOM bindings
-- **Event → Action flow**: Browser events invoke branded EventHandlers, which call Kin Actions
-- **DOM identity preserved**: Reactive updates maintain existing DOM node references
-- **Lifecycle independence**: DOM unmount, grant revocation, and node destruction are independent operations
-
-**Example application structure**:
-
-```ts
-// Alice's account view (full access)
-function AliceAccount(node: ReactiveNode): ChildNode {
-  return element(
-    "section",
-    {},
-    element("div", {}, text(`Balance: $${node.state.balance}`)),
-    element(
-      "button",
-      {
-        onClick: handler(() => node.actions.deposit(100)),
-      },
-      text("Deposit $100"),
-    ),
-  );
-}
-
-// Bob's shared view (authorized access only)
-function BobSharedView(view: AuthorizedView): ChildNode {
-  return element(
-    "section",
-    {},
-    text(`Name: ${view.state.profile.name}`), // ✓ authorized
-    text(`Email: ${view.state.profile.email}`), // ✓ authorized
-    // view.state.balance → throws FIELD_NOT_GRANTED
-    // view.state.profile.password → throws FIELD_NOT_GRANTED
-  );
-}
-```
-
-**Why no component runtime is necessary**:
-
-- Plain function composition provides all needed reusability
-- View functions execute once at mount, eliminating the need for component lifecycle hooks
-- Fine-grained reactive bindings eliminate the need for VDOM diffing
-- Authorization is handled by Grant/AuthorizedView, not by component props/context
-- Event handlers are branded functions, not component methods
-
-**Demo files**:
-
-- `demo/browser-app.ts` — Browser application demo with account sharing UI
-- `test/phase-e5.test.ts` — 18 integration test categories validating end-to-end flow
-
-**Run the browser demo**:
+Install Kin via npm:
 
 ```bash
-npm run browser-demo
+npm install kin-prototype
 ```
 
-**Event handler identification**:
+### TypeScript Configuration
 
-```ts
-// ✅ Correct — branded handler
-onClick: handler(() => node.actions.increment());
+Kin is distributed as standard ES2022 modules with TypeScript declarations. Configure your `tsconfig.json`:
 
-// ❌ Wrong — plain getter treated as data binding, not event
-onClick: () => String(node.state.count);
-
-// ✅ Also correct — non-onXxx name with brand works
-click: handler(() => node.actions.increment());
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022", "DOM"],
+    "strict": true
+  }
+}
 ```
 
-### API example
+*Note: Bundlers such as Vite, esbuild, and Rollup can also use `"moduleResolution": "bundler"`.*
+
+---
+
+## Quick Start
+
+Here is a complete, minimal counter application demonstrating reactive state, an explicit Action, a declarative view descriptor, event handling, and DOM mounting:
 
 ```ts
 import {
   createReactiveHome,
-  mount,
   element,
   text,
   handler,
-} from "kin-prototype";
+  mount,
+  type ReactiveNode,
+  type ChildNode,
+} from 'kin-prototype'
 
-const home = createReactiveHome();
-const counter = home.node({
+// 1. Define State and Actions types
+type CounterState = {
+  count: number
+}
+
+type CounterActions = {
+  increment(ctx: { state: CounterState }): void
+  decrement(ctx: { state: CounterState }): void
+}
+
+// 2. Create the reactive Home container
+const home = createReactiveHome()
+
+// 3. Create a Node owning state and actions
+const counter = home.node<CounterState, CounterActions>({
   state: { count: 0 },
   actions: {
     increment(ctx) {
-      ctx.state.count++;
+      ctx.state.count += 1
+    },
+    decrement(ctx) {
+      ctx.state.count -= 1
     },
   },
-});
+})
 
-const view = element(
-  "button",
-  { onClick: handler(() => counter.actions.increment()) },
-  text(() => String(counter.state.count)),
-);
+// 4. Declare the view function (pure function returning immutable descriptors)
+function CounterView(node: ReactiveNode<CounterState, CounterActions>): ChildNode {
+  return element(
+    'div',
+    { class: 'counter-card' },
+    element('h1', text('Kin Counter')),
+    element('p', text(() => `Current count: ${node.state.count}`)),
+    element(
+      'button',
+      { onClick: handler(() => node.actions.increment()) },
+      text('+ Increment'),
+    ),
+    element(
+      'button',
+      { onClick: handler(() => node.actions.decrement()) },
+      text('- Decrement'),
+    ),
+  )
+}
 
-const container = document.getElementById("app");
-const handle = mount(home, view, container);
+// 5. Mount into a DOM container
+const container = document.getElementById('app')!
+const handle = mount(home, () => CounterView(counter), container)
 
-// Click triggers action → reactive update → DOM text changes
-// No View function rerun
-
-handle.unmount();
-home.destroy();
-```
-
-### Phase E boundaries
-
-**NOT implemented** (out of scope for E.1–E.5):
-
-- JSX
-- Virtual DOM
-- Component instances/lifecycle
-- Hooks (useState, useEffect, etc.)
-- Deep reactive tracking (deferred)
-- SSR/hydration
-- Forms framework
-- Routing
-
-### Phase E project structure
-
-```
-src/
-├── view/
-│   ├── types.ts    # ChildNode descriptors
-│   ├── factory.ts  # element(), text(), fragment(), when(), handler()
-│   └── index.ts    # View module exports
-├── dom/
-│   ├── types.ts    # View, MountHandle
-│   ├── renderer.ts # mount() with fine-grained bindings
-│   └── index.ts    # DOM module exports
+// Later: clean up subscriptions, event listeners, and DOM elements
+// handle.unmount()
+// home.destroy()
 ```
 
 ---
 
-## Project Structure
+## Core Concepts
 
+### Home
+
+The `Home` is the root container and lifecycle coordinator. It creates and owns root-level Nodes, coordinates reactive scheduling, manages cross-node Relationships, and cleans up all descendants when destroyed.
+
+```ts
+import { createReactiveHome } from 'kin-prototype'
+
+const home = createReactiveHome()
 ```
-kin-prototype/
-├── src/
-│   ├── types.ts            # Type contracts (Phase A + B + C)
-│   ├── node.ts             # createNode() — Phase A node factory
-│   ├── home.ts             # createHome() — Phase A non-reactive entry point
-│   ├── reactive.ts         # Reactive kernel (FieldSubscriberIndex, scheduler)
-│   ├── reactive-node.ts    # createReactiveNode() — Phase B reactive node factory
-│   ├── reactive-home.ts    # createReactiveHome() — Phase B + C entry point
-│   ├── relationship.ts     # Phase C/D Relationship, Grant, Capability + path validation
-│   ├── grant.ts            # Phase C GrantStore
-│   ├── authorization.ts    # Phase C/D authorization, AuthorizedView, nested proxy
-│   ├── validation.ts       # Phase F.3 state shape validation
-│   ├── view/
-│   │   ├── types.ts        # Phase E/G — ChildNode descriptors (Element, Text, Fragment, When, Each)
-│   │   ├── factory.ts      # Phase E/G — element(), text(), fragment(), when(), each(), handler()
-│   │   └── index.ts        # View module exports
-│   ├── dom/
-│   │   ├── types.ts        # Phase E.2 — View, MountHandle
-│   │   ├── renderer.ts     # Phase E.2 — mount() with fine-grained bindings & each() reconciliation
-│   │   └── index.ts        # DOM module exports
-│   └── index.ts            # Frozen public exports
-├── demo/                   # End-to-end integration scripts
-│   ├── account-sharing.ts  # Node.js capability & authorization demo
-│   └── browser-app.ts      # Browser-based account sharing UI demo
-├── playground/             # Interactive Vite applications
-│   ├── index.html          # Reactive counter demo
-│   ├── todo.html           # Dynamic keyed list demo (each())
-│   ├── account-sharing.html# Reactive authorization & sharing demo
-│   └── src/                # TypeScript application drivers
-├── test/                   # Comprehensive test suites (638 tests covering Phases A–G)
-├── benchmark/
-│   └── bench.ts            # Benchmarks S1–S6, C1–C4
-├── package.json
-├── tsconfig.json
-├── tsconfig.build.json
-└── .gitignore
+
+### Node
+
+A `Node` is the fundamental runtime entity in Kin. A Node holds:
+* An owned **State** record.
+* Bound **Actions**.
+* Optional **Child Nodes** in the ownership hierarchy.
+
+```ts
+const userNode = home.node({
+  state: { username: 'alice', online: true },
+  actions: {
+    setOnline(ctx, status: boolean) {
+      ctx.state.online = status
+    },
+  },
+})
+```
+
+A Node has dynamic structural roles (`isParent`, `isChild`) derived from its position in the ownership tree. Destroying a Node executes post-order cascade destruction on all of its child nodes, detaches its relationships, and revokes active grants.
+
+### State
+
+* **Ownership**: State is a plain object owned exclusively by one Node.
+* **Readonly by default**: Outside of an Action, `node.state` is a readonly proxy. Direct assignments (`node.state.count = 5`) throw a runtime `TypeError`.
+* **Automatic tracking**: Reading `node.state.field` inside a reactive getter registers a dependency on `nodeId:field`.
+* **Deep cloning**: Initial state is deep-cloned on node creation to prevent caller aliasing.
+
+### Actions
+
+Actions are the **only** mutation boundary in Kin. Each action receives a mutable context `ctx` containing `ctx.state`.
+
+```ts
+const wallet = home.node({
+  state: { balance: 100 },
+  actions: {
+    deposit(ctx, amount: number) {
+      if (amount <= 0) throw new Error('Invalid amount')
+      ctx.state.balance += amount
+    },
+  },
+})
+
+// Invoking an action:
+wallet.actions.deposit(50)
+console.log(wallet.state.balance) // 150
+```
+
+When an action mutates a property, Kin compares the value with `Object.is`. If changed, a notification is queued for microtask scheduling.
+
+### Relationships
+
+A `Relationship` represents a directional link between two Nodes (`source → target`) within the same Home. Creating a relationship does **not** grant access by itself; it establishes the trust channel across which Grants are issued.
+
+```ts
+const alice = home.node({ state: { balance: 100, name: 'Alice' } })
+const bob = home.node({ state: { id: 'bob' } })
+
+// Establish directional relationship from observer (bob) to target (alice)
+const rel = home.relationship(bob, alice)
+```
+
+### Grants
+
+A `Grant` is an access token issued over a Relationship. Grants are revocable at any time. Revoking a grant automatically disposes all linked subscriptions.
+
+```ts
+const grant = rel.grant(capability(['name']))
+
+// Revoke access when no longer permitted
+// grant.revoke()
+```
+
+### Capabilities
+
+A `Capability` defines which fields of the target Node are readable. Capabilities support both top-level fields and nested dot-separated paths:
+
+```ts
+import { capability } from 'kin-prototype'
+
+// Grants read access to 'profile.name' and 'profile.email', but not 'profile.password'
+const cap = capability(['profile.name', 'profile.email'])
+```
+
+Path validation rejects invalid formats, numeric indexes, prototype properties (`__proto__`, `constructor`, `prototype`), and double-underscore prefixes.
+
+### AuthorizedView
+
+An `AuthorizedView` is a filtered, reactively-tracked view of a target Node's state. Unauthorized field reads throw a typed `KinAuthError` with code `'FIELD_NOT_GRANTED'`.
+
+An `AuthorizedView` can be acquired synchronously or subscribed to reactively:
+
+```ts
+// 1. Direct synchronous acquisition via Grant:
+const view = grant.view<AccountState>()
+console.log(view.state.profile.name) // ✓ Alice
+// console.log(view.state.profile.password) // ✗ Throws KinAuthError('FIELD_NOT_GRANTED')
+
+// 2. Direct synchronous acquisition via Home:
+const view2 = home.authorizedView<AccountState>(bob, alice, grant)
+
+// 3. Reactive subscription:
+const sub = home.subscribeAs(bob, alice, grant, (view) => {
+  console.log('Observed name:', view.state.profile.name)
+})
 ```
 
 ---
 
-## Running the Tests
+## Reactivity
+
+Kin uses a fine-grained, dependency-tracking reactive kernel.
+
+### How It Works
+
+1. **Dependency Registration**: When a reactive getter (e.g. `() => node.state.count`) executes, property reads on `node.state` dynamically register field dependencies (`nodeId:field`).
+2. **Action Execution**: When an action mutates a property, Kin checks `Object.is(previous, next)`. If different, the field is marked dirty.
+3. **Batched Microtask Flush**: Dirty fields look up their subscribers in an $O(1)$ index. Affected subscriptions are scheduled and executed in a batched microtask flush.
+4. **Surgical DOM Update**: Only the specific DOM text node or element property associated with that getter is modified.
+
+```ts
+// Reactive text binding:
+element('p', text(() => `Score: ${game.state.score}`))
+
+// Reactive attribute binding:
+element('div', {
+  class: () => game.state.isGameOver ? 'modal visible' : 'modal hidden',
+})
+```
+
+### Reactive Scope & Batched Updates
+
+Multiple mutations inside an action or across synchronous calls are automatically coalesced:
+
+```ts
+actions.updateProfile(ctx) {
+  ctx.state.score += 10
+  ctx.state.level += 1
+  ctx.state.score += 5
+}
+// Dependent subscribers run exactly once during the next microtask flush.
+```
+
+### Documented Reactivity Limitation
+
+Kin v0.1 tracks dependencies at the **top-level field** level (`nodeId:profile`).
+
+* **Replacing** a nested object reference (`ctx.state.profile = { ...newProfile }`) triggers subscribers.
+* **Mutating** a deep nested property in place (`ctx.state.profile.name = 'Bob'`) without changing the parent object reference does **not** trigger reactive subscribers.
+
+Always update nested state by reassigning the top-level property:
+
+```ts
+// ✓ Correct: Reassign top-level property
+ctx.state.profile = { ...ctx.state.profile, name: 'Bob' }
+
+// ✗ Ineffective for top-level reactivity:
+// ctx.state.profile.name = 'Bob'
+```
+
+---
+
+## View System
+
+Views in Kin are **pure functions** that return immutable descriptor trees. They are not framework components, have no internal state instances, and do not execute on every state change.
+
+```text
+View Function (executes once at mount)
+  ↓
+ChildNode Descriptor Tree (frozen)
+  ↓
+DOM Renderer (wires DOM elements & fine-grained subscribers)
+  ↓
+Live DOM
+```
+
+### Descriptors (`ChildNode`)
+
+All view descriptors are frozen plain JavaScript objects:
+
+| Descriptor | Description | Factory |
+|---|---|---|
+| `ElementNode` | HTML element with tag name, optional props, and children | `element()` |
+| `TextNode` | Static or reactive DOM text node | `text()` |
+| `FragmentNode` | Transparent grouping of children without a wrapper element | `fragment()` |
+| `ConditionalNode` | Reactive branching structure | `when()` |
+| `EachNode` | Dynamic keyed list structure | `each()` |
+
+---
+
+## Props and Reactive Props
+
+The `element()` function creates element descriptors with support for static values, reactive getters, and branded event handlers:
+
+```ts
+element('input', {
+  // Static props
+  id: 'username-input',
+  type: 'text',
+
+  // Reactive prop getter
+  value: () => form.state.username,
+  disabled: () => form.state.isSubmitting,
+
+  // Event handler
+  onInput: handler((event) => {
+    const input = event.target as HTMLInputElement
+    form.actions.setUsername(input.value)
+  }),
+})
+```
+
+### Optional Props
+
+Props are optional. When an element does not need attributes or listeners, pass children directly:
+
+```ts
+// Props omitted:
+element('div',
+  element('h1', text('Title')),
+  element('p', text('Paragraph')),
+)
+```
+
+### Supported Prop Values (`PropValue`)
+
+* `string | number | boolean | null | undefined`: Static attribute/property.
+* `ReactiveGetter`: A zero-argument function (`() => PropValue`) returning a primitive value.
+* `EventHandler`: A callback branded via `handler()`.
+
+---
+
+## Events
+
+In JavaScript, reactive getters (`() => string`) and event callbacks (`() => void`) have identical function signatures at runtime. To prevent heuristics and eliminate ambiguity, Kin requires explicit event handler branding using `handler()`:
+
+```ts
+import { handler } from 'kin-prototype'
+
+element(
+  'button',
+  {
+    onClick: handler((event) => {
+      actions.handleClick()
+    }),
+  },
+  text('Submit'),
+)
+```
+
+### Why `handler()` Is Required
+
+1. **Avoids property name heuristics**: Naming conventions like `on[A-Z]` fail when reactive getters represent state properties such as `online: () => state.online`.
+2. **Authoritative wiring**: When the DOM renderer encounters a value branded by `handler()`, it adds a native DOM event listener (`addEventListener`).
+3. **Native event passing**: The callback receives the standard native browser `Event`.
+4. **Lifecycle tracking**: Every event listener is tracked by the renderer and cleanly detached upon unmount.
+
+### Advanced Utility: `isEventHandler()`
+
+Kin exports `isEventHandler(value)` to verify whether a given property value is a branded event handler:
+
+```ts
+import { isEventHandler, handler } from 'kin-prototype'
+
+const click = handler(() => {})
+isEventHandler(click) // true
+isEventHandler(() => 'value') // false
+```
+
+---
+
+## Keyed Lists with `each()`
+
+Dynamic collections are rendered using the `each()` primitive. It reconciles real DOM nodes between comment anchors (`<!--kin-each-->` and `<!--/kin-each-->`) using key extractors:
+
+```ts
+import { each, element, text, handler, type ChildNode } from 'kin-prototype'
+
+function TodoList(node: ReactiveNode<TodoState, TodoActions>): ChildNode {
+  return element(
+    'ul',
+    { class: 'todo-list' },
+    each(
+      () => node.state.todos,
+      (todo) => todo.id,
+      (todo, getIndex) =>
+        element(
+          'li',
+          { id: `todo-${todo.id}` },
+          element('span', text(todo.title)),
+          element(
+            'button',
+            { onClick: handler(() => node.actions.remove(todo.id)) },
+            text('Delete'),
+          ),
+        ),
+    ),
+  )
+}
+```
+
+### Guarantees of `each()`
+
+* **Keyed identity retention**: Existing DOM nodes are preserved and repositioned; element instances are not recreated during reordering.
+* **Item-local reactivity**: When an item's fields update, only that item's reactive bindings execute. Sibling items and parent collections do not rerender.
+* **Surgical insertions and deletions**: Appending, prepending, and removing items only touch the affected DOM nodes.
+* **Lifecycle disposal**: Removed items automatically have all associated reactive subscriptions and event listeners disposed recursively.
+* **Duplicate key protection**: Duplicate keys throw a descriptive runtime error.
+
+---
+
+## Conditional Views with `when()`
+
+The `when()` primitive provides declarative conditional branching:
+
+```ts
+import { when, element, text } from 'kin-prototype'
+
+when(
+  () => node.state.count < 0,
+  element('p', { class: 'warning' }, text('Warning: Negative balance')),
+  element('p', { class: 'info' }, text('Account in good standing')),
+)
+```
+
+* **`condition`**: A reactive getter returning a boolean (`() => boolean`).
+* **`consequent`**: The descriptor rendered when the condition evaluates to `true`.
+* **`otherwise`** *(optional)*: The descriptor rendered when the condition evaluates to `false`.
+* **Lifecycle**: When branches switch, old nodes, subscriptions, and listeners are unmounted and disposed before new branch nodes are materialized.
+
+---
+
+## Authorization + Views
+
+Kin enables capability-based access control directly integrated into the view layer:
+
+```text
+Alice Node (owns sensitive state)
+      ↓
+Relationship (Bob → Alice)
+      ↓
+Grant (scoped capability: ['profile.name', 'profile.email'])
+      ↓
+Capability Filter
+      ↓
+AuthorizedView (Alice's state behind security proxy)
+      ↓
+Bob's Reactive DOM (renders only permitted fields)
+```
+
+### Example: Secure Account Sharing
+
+```ts
+import {
+  createReactiveHome,
+  capability,
+  element,
+  text,
+  mount,
+  type AuthorizedView,
+} from 'kin-prototype'
+
+const home = createReactiveHome()
+
+// Alice owns sensitive account details
+const alice = home.node({
+  state: {
+    balance: 5000,
+    profile: {
+      name: 'Alice Smith',
+      email: 'alice@example.com',
+      passwordHash: 'secret_hash_987',
+    },
+  },
+  actions: {},
+})
+
+// Bob is an observer node
+const bob = home.node({ state: { id: 'bob' } })
+
+// Issue a grant permitting only name and email
+const rel = home.relationship(bob, alice)
+const grant = rel.grant(capability(['profile.name', 'profile.email']))
+
+// Acquire Bob's authorized view
+const bobView = grant.view<typeof alice.state>()
+
+function SharedProfileView(view: AuthorizedView<typeof alice.state>) {
+  return element(
+    'div',
+    { class: 'profile-card' },
+    element('h3', text(() => `Name: ${view.state.profile.name}`)),   // ✓ Permitted
+    element('p', text(() => `Email: ${view.state.profile.email}`)),  // ✓ Permitted
+    // Reading view.state.balance throws KinAuthError('FIELD_NOT_GRANTED')
+    // Reading view.state.profile.passwordHash throws KinAuthError('FIELD_NOT_GRANTED')
+  )
+}
+
+mount(home, () => SharedProfileView(bobView), document.getElementById('shared-ui')!)
+```
+
+Unauthorized fields are protected at the proxy level. They cannot be read, bound, or leaked into the DOM.
+
+---
+
+## Lifecycle
+
+The `mount()` function mounts a descriptor tree into a container element and returns a `MountHandle`:
+
+```ts
+import { mount } from 'kin-prototype'
+
+const handle = mount(home, () => AppView(node), container)
+
+// Teardown
+handle.unmount()
+```
+
+### Teardown Guarantees
+
+* **Subscriptions**: All reactive subscriptions created for text nodes, prop bindings, conditional branches, and keyed lists are cancelled.
+* **DOM Event Listeners**: All native listeners attached via `handler()` are removed with `removeEventListener`.
+* **DOM Cleanup**: Generated DOM nodes and comment markers are detached from the container.
+* **Idempotency**: Calling `handle.unmount()` multiple times is safe and performs no duplicate work.
+
+---
+
+## Security Model
+
+Kin incorporates runtime hardening developed and verified in Phase F:
+
+* **Deep Readonly State**: `node.state` is protected by a readonly proxy outside of Actions. Prototype properties (`__proto__`, `constructor`, `prototype`) evaluate to `undefined`.
+* **State Type Validation**: Initial state and action assignments accept only valid primitives, plain objects, and arrays. Special types (`Date`, `RegExp`, `Map`, `Set`, class instances) are rejected to eliminate prototype poisoning vectors.
+* **Nested Mutation Defense**: Mutating nested state objects outside of actions throws a runtime `TypeError`.
+* **Proxy Invariant Compliance**: Proxies maintain ECMAScript invariant compatibility with frozen and sealed targets.
+* **Cross-Home Isolation**: Relationships, Grants, and AuthorizedViews cannot cross Home container boundaries.
+* **Defensive Snapshots**: Capability paths are snapshotted on creation; mutating the original configuration array does not alter issued grants.
+
+---
+
+## API Reference
+
+### Runtime Exports
+
+Kin exports 13 public runtime symbols from `'kin-prototype'`:
+
+```ts
+import {
+  createReactiveHome,
+  createHome,
+  capability,
+  KinAuthError,
+  element,
+  text,
+  fragment,
+  when,
+  each,
+  handler,
+  isEventHandler,
+  isChildNode,
+  mount,
+} from 'kin-prototype'
+```
+
+| Symbol | Category | Description |
+|---|---|---|
+| `createReactiveHome()` | Core | Creates a reactive Home container with scheduling, relationships, and authorization. |
+| `createHome()` | Core | Creates a non-reactive Phase A Home container (for testing/benchmarking). |
+| `capability(fields)` | Authorization | Creates a validated, immutable `Capability` from an array of path strings. |
+| `KinAuthError` | Authorization | Error class thrown on authorization failures (with `.code` discriminant). |
+| `element(tag, props?, ...children)` | View | Creates an `ElementNode` descriptor (props are optional). |
+| `text(value)` | View | Creates a `TextNode` descriptor from a static string or reactive getter. |
+| `fragment(...children)` | View | Creates a `FragmentNode` descriptor grouping children without a wrapper DOM node. |
+| `when(condition, consequent, otherwise?)` | View | Creates a `ConditionalNode` descriptor for reactive branching. |
+| `each(collection, key, render)` | View | Creates an `EachNode` descriptor for keyed dynamic list reconciliation. |
+| `handler(fn)` | Events | Brands a callback function as an authoritative `EventHandler`. |
+| `isEventHandler(value)` | Utility | Runtime type guard returning `true` if `value` is an `EventHandler`. |
+| `isChildNode(value)` | Utility | Runtime type guard returning `true` if `value` is a valid `ChildNode` descriptor. |
+| `mount(home, view, container)` | DOM | Renders a descriptor tree into a DOM container and returns a `MountHandle`. |
+
+### Important Types
+
+```ts
+import type {
+  ReactiveHome,
+  ReactiveNode,
+  ReactiveNodeDefinition,
+  ActionContext,
+  ActionsMap,
+  BoundActions,
+  ReadonlyState,
+  StateRecord,
+  Subscriber,
+  Home,
+  Node,
+  NodeDefinition,
+  LifecycleState,
+  Capability,
+  Grant,
+  Relationship,
+  KinAuthErrorCode,
+  AuthorizedView,
+  View,
+  MountHandle,
+  ChildNode,
+  ElementNode,
+  TextNode,
+  FragmentNode,
+  ConditionalNode,
+  EachNode,
+  KeyExtractor,
+  ItemRenderer,
+  PropValue,
+  ReactiveGetter,
+  EventHandler,
+} from 'kin-prototype'
+```
+
+*Note: Internal branding symbols (`EVENT_HANDLER_BRAND`, `CHILD_NODE_BRAND`) are module-private and intentionally excluded from public exports.*
+
+---
+
+## Architecture
+
+Kin is organized into discrete architectural layers:
+
+```text
+Core Runtime       (Home, Node, State, Actions, Cascade Destruction)
+    ↓
+Reactivity         (ReactiveScope, FieldSubscriberIndex, Scheduler)
+    ↓
+Authorization      (Relationship, Grant, Capability, AuthorizedView)
+    ↓
+View Descriptors   (Immutable ChildNode Trees: Element, Text, When, Each)
+    ↓
+DOM Renderer       (Materialization, Fine-Grained Bindings, Keyed Reconciliation)
+    ↓
+Browser DOM        (Native Events, Targeted DOM Updates)
+```
+
+### Architectural Boundaries
+
+Kin intentionally avoids traditional framework abstractions:
+* **No Virtual DOM**: Real DOM nodes are created directly and patched in place.
+* **No Component Runtime**: Views are plain functions returning descriptors. There are no component instances, hidden states, or component lifecycles.
+* **No Router**: Kin focuses on state, authorization, and rendering. Application routing is left to standard web platform APIs or dedicated routing libraries.
+* **No Global State Store**: Nodes own their state and coordinate through the Home hierarchy and authorized Relationships.
+* **No SSR Runtime**: Kin v0.1 requires a global `document` environment (browser or test DOM like Happy DOM).
+
+---
+
+## Demos and Playgrounds
+
+The repository contains runnable integration demos and interactive browser applications:
+
+* **Reactive Counter**: `playground/index.html`
+* **Keyed Dynamic List (`each`)**: `playground/todo.html`
+* **Capability-Based Account Sharing**: `playground/account-sharing.html`
+* **Console Demo**: `demo/account-sharing.ts` (`npm run demo`)
+* **Browser Demo Script**: `demo/browser-app.ts` (`npm run browser-demo`)
+
+To run the interactive playground locally:
 
 ```bash
-npm install
+npm run playground:dev
+```
+
+---
+
+## Running Tests
+
+Kin has a comprehensive test suite with 638 tests covering Phases A through G:
+
+```bash
 npm test
 ```
 
-Expected output:
+Expected result:
 
-```
-ℹ tests 638
-ℹ pass  633
-ℹ skipped 5
-ℹ fail  0
+```text
+# tests 638
+# suites 281
+# pass 633
+# fail 0
+# skipped 5
 ```
 
-Run typecheck:
+Type checking:
 
 ```bash
 npm run typecheck
 ```
 
-Run benchmarks:
+Building the package:
 
 ```bash
-node --import tsx/esm benchmark/bench.ts
+npm run build
 ```
 
 ---
 
-## Completed Phases
+## License
 
-| Phase | Status      | Description                                                                                      |
-| ----- | ----------- | ------------------------------------------------------------------------------------------------ |
-| A     | ✅ Complete | Home, Node, Ownership, State, Actions, Lifecycle, Cascade Destroy                                |
-| B     | ✅ Complete | Field-level reactivity, subscribers, batching, lifecycle cleanup                                 |
-| C     | ✅ Complete | Relationship, Grant, Capability, Authorization, Cross-node access, AuthorizedView                |
-| D     | ✅ Complete | Nested path authorization, path validation, filtered nested proxies, subtree grants              |
-| E     | ✅ Complete | View model, DOM renderer, fine-grained reactive bindings, View composition, no component runtime |
-| F     | ✅ Complete | Security hardening, state deep cloning, prototype pollution defense, proxy invariant compliance   |
-| G     | ✅ Complete | Framework usability, each() keyed dynamic lists, AuthorizedView accessor, props-optional element, API freeze |
-
----
-
-## Deferred Findings
-
-**Deep reactive tracking** — `node.state.profile.name` registers a dep on `"profile"`, not `"profile.name"`. In-place mutation of nested objects does not notify subscribers. Replacing the whole object does. Phase D authorization is fine-grained; Phase D reactivity is not. Deep reactive tracking (`nodeId:profile.name`) remains deferred beyond Phase E.
-
-**`ReadonlyState<S>` is shallow** — TypeScript readonly does not cover nested objects. Runtime protection is enforced by the authorization proxy, not the TypeScript type system.
-
-**`_lifecycle` visibility** — `_lifecycle` is on the internal node interface for test observability. A future published API should expose `node.isDestroyed` instead.
-
-**Home root enumeration** — No public `home.roots` accessor. DevTools and SSR phases will need this.
-
-**Action authorization** — `AuthorizedView` currently exposes only `state`. Authorizing specific action invocations on the target is deferred.
+MIT © Aung Sann Phyo
